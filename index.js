@@ -30,6 +30,7 @@ async function run() {
     const testimonialsCollection = client.db("squirrelDb").collection("reviews");
     const faqsCollection = client.db("squirrelDb").collection("faqs");
     const faqsAddCollection = client.db("squirrelDb").collection("faqsAdd");
+    const contactCollection = client.db("squirrelDb").collection("contact");
 
     // testimonials related api
 
@@ -120,6 +121,26 @@ async function run() {
       const result = await faqsAddCollection.updateOne(filter, updatedDoc);
       res.send(result);
     });
+
+    // contact related api
+
+    app.get('/contact', async (req, res) => {
+      const result = await contactCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.post('/contact', async (req, res) => {
+      const item = req.body;
+      const result = await contactCollection.insertOne(item);
+      res.send(result);
+    });
+
+    app.delete('/contact/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) }
+      const result = await contactCollection.deleteOne(query);
+      res.send(result);
+    })
 
 
     await client.db("admin").command({ ping: 1 });
