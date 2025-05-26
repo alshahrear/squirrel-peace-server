@@ -31,6 +31,7 @@ async function run() {
     const faqsCollection = client.db("squirrelDb").collection("faqs");
     const faqsAddCollection = client.db("squirrelDb").collection("faqsAdd");
     const contactCollection = client.db("squirrelDb").collection("contact");
+    const storyCollection = client.db("squirrelDb").collection("story");
 
     // testimonials related api
 
@@ -141,6 +142,43 @@ async function run() {
       const result = await contactCollection.deleteOne(query);
       res.send(result);
     })
+
+    // blog story related api
+
+    app.get('/story', async (req, res) => {
+      const result = await storyCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.post('/story', async (req, res) => {
+      const item = req.body;
+      const result = await storyCollection.insertOne(item);
+      res.send(result);
+    });
+
+    app.delete('/story/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) }
+      const result = await storyCollection.deleteOne(query);
+      res.send(result);
+    })
+
+    app.patch('/story/:id', async (req, res) => {
+      const id = req.params.id;
+      const item = req.body;
+      const filter = { _id: new ObjectId(id) };
+      const updatedDoc = {
+        $set: {
+          storyTitle: item.storyTitle,
+          storyDescription: item.storyDescription,
+          storyCategory: item.storyCategory,
+          storyImage: item.storyImage
+        }
+      };
+      const result = await storyCollection.updateOne(filter, updatedDoc);
+      res.send(result);
+    });
+
 
 
     await client.db("admin").command({ ping: 1 });
