@@ -1,6 +1,7 @@
 const express = require('express');
 const app = express();
 const cors = require('cors');
+const jwt = require('jsonwebtoken');
 const { MongoClient, ServerApiVersion, ObjectId, } = require('mongodb');
 require('dotenv').config();
 const port = process.env.PORT || 5000;
@@ -27,11 +28,107 @@ async function run() {
     await client.connect();
     // Send a ping to confirm a successful connection
 
+    const usersCollection = client.db("squirrelDb").collection("users");
     const testimonialsCollection = client.db("squirrelDb").collection("reviews");
     const faqsCollection = client.db("squirrelDb").collection("faqs");
     const faqsAddCollection = client.db("squirrelDb").collection("faqsAdd");
     const contactCollection = client.db("squirrelDb").collection("contact");
     const storyCollection = client.db("squirrelDb").collection("story");
+    const blogCollection = client.db("squirrelDb").collection("blog");
+    const newsletterFaqCollection = client.db("squirrelDb").collection("newsletterFaq");
+
+
+    // jwt related api
+
+    app.post('/jwt', async (req, res) => {
+      const user = req.body;
+      const token = jwt.sign(user, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '1h' });
+      res.send({ token });
+    })
+
+    // middlewares 
+    const verifyToken = (req, res, next) => {
+      // console.log('inside verify token', req.headers.authorization);
+      if (!req.headers.authorization) {
+        return res.status(401).send({ message: 'unauthorized access' });
+      }
+      const token = req.headers.authorization.split(' ')[1];
+      jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
+        if (err) {
+          return res.status(401).send({ message: 'unauthorized access' })
+        }
+        req.decoded = decoded;
+        next();
+      })
+    }
+
+    // use verify admin after verifyToken
+    const verifyAdmin = async (req, res, next) => {
+      const email = req.decoded.email;
+      const query = { email: email };
+      const user = await usersCollection.findOne(query);
+      const isAdmin = user?.role === 'admin';
+      if (!isAdmin) {
+        return res.status(403).send({ message: 'forbidden access' });
+      }
+      next();
+    }
+
+    // users related api
+
+    app.get('/users', verifyToken, async (req, res) => {
+      const result = await usersCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.get('/users/admin/:email', verifyToken, async (req, res) => {
+      const email = req.params.email;
+
+      if (email !== req.decoded.email) {
+        return res.status(403).send({ message: 'forbidden access' })
+      }
+
+      const query = { email: email };
+      const user = await usersCollection.findOne(query);
+      let admin = false;
+      if (user) {
+        admin = user?.role === 'admin';
+      }
+      res.send({ admin });
+    })
+
+    app.post('/users', async (req, res) => {
+      const user = req.body;
+      // checking user already created or not
+      const query = { email: user.email }
+      const existingUser = await usersCollection.findOne(query);
+      if (existingUser) {
+        return res.send({ message: 'user already exists', insertedId: null })
+      }
+      const result = await usersCollection.insertOne(user);
+      res.send(result);
+    });
+
+    app.delete('/users/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await usersCollection.deleteOne(query);
+      res.send(result);
+    });
+
+
+    app.patch('/users/admin/:id', async (req, res) => {
+      const id = req.params.id;
+      const filter = { _id: new ObjectId(id) };
+      const updatedDoc = {
+        $set: {
+          role: 'admin'
+        }
+      }
+      const result = await usersCollection.updateOne(filter, updatedDoc);
+      res.send(result);
+    })
+
 
     // testimonials related api
 
@@ -125,28 +222,38 @@ async function run() {
 
     // contact related api
 
+    // Only admin can get all contacts
     app.get('/contact', async (req, res) => {
       const result = await contactCollection.find().toArray();
       res.send(result);
     });
 
+    // Only admin can post a new contact
     app.post('/contact', async (req, res) => {
       const item = req.body;
       const result = await contactCollection.insertOne(item);
       res.send(result);
     });
 
+    // Only admin can delete a contact
     app.delete('/contact/:id', async (req, res) => {
       const id = req.params.id;
-      const query = { _id: new ObjectId(id) }
+      const query = { _id: new ObjectId(id) };
       const result = await contactCollection.deleteOne(query);
       res.send(result);
-    })
+    });
 
-    // blog story related api
+
+    // story related api
 
     app.get('/story', async (req, res) => {
       const result = await storyCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.get('/story/:id', async (req, res) => {
+      const id = req.params.id;
+      const result = await storyCollection.findOne({ _id: new ObjectId(id) });
       res.send(result);
     });
 
@@ -176,6 +283,76 @@ async function run() {
         }
       };
       const result = await storyCollection.updateOne(filter, updatedDoc);
+      res.send(result);
+    })
+
+    // blog related api
+
+    app.get('/blog', async (req, res) => {
+      const result = await blogCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.post('/blog', async (req, res) => {
+      const item = req.body;
+      const result = await blogCollection.insertOne(item);
+      res.send(result);
+    });
+
+    app.delete('/blog/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) }
+      const result = await blogCollection.deleteOne(query);
+      res.send(result);
+    })
+
+    app.patch('/blog/:id', async (req, res) => {
+      const id = req.params.id;
+      const item = req.body;
+      const filter = { _id: new ObjectId(id) };
+      const updatedDoc = {
+        $set: {
+          blogTitle: item.blogTitle,
+          blogDescription: item.blogDescription,
+          blogCategory: item.blogCategory,
+          blogImage: item.blogImage
+        }
+      };
+      const result = await blogCollection.updateOne(filter, updatedDoc);
+      res.send(result);
+    })
+
+    // newsletterFaq related api
+
+    app.get('/newsletterFaq', async (req, res) => {
+      const result = await newsletterFaqCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.post('/newsletterFaq', async (req, res) => {
+      const item = req.body;
+      const result = await newsletterFaqCollection.insertOne(item);
+      res.send(result);
+    });
+
+    app.delete('/newsletterFaq/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) }
+      const result = await newsletterFaqCollection.deleteOne(query);
+      res.send(result);
+    })
+
+    app.patch('/newsletterFaq/:id', async (req, res) => {
+      const id = req.params.id;
+      const item = req.body;
+      const filter = { _id: new ObjectId(id) };
+      const updatedDoc = {
+        $set: {
+          faqQuestion: item.faqQuestion,
+          faqAnswer: item.faqAnswer
+        }
+      };
+      const result = await newsletterFaqCollection.updateOne(filter, updatedDoc);
       res.send(result);
     });
 
