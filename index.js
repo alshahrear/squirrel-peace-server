@@ -33,6 +33,7 @@ async function run() {
     const faqsCollection = client.db("squirrelDb").collection("faqs");
     const faqsAddCollection = client.db("squirrelDb").collection("faqsAdd");
     const contactCollection = client.db("squirrelDb").collection("contact");
+    const commentCollection = client.db("squirrelDb").collection("comment");
     const storyCollection = client.db("squirrelDb").collection("story");
     const blogCollection = client.db("squirrelDb").collection("blog");
     const newsletterFaqCollection = client.db("squirrelDb").collection("newsletterFaq");
@@ -243,6 +244,73 @@ async function run() {
       res.send(result);
     });
 
+    // comment related api
+
+    app.get('/comment', async (req, res) => {
+      const result = await commentCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.post('/comment/blog', async (req, res) => {
+      const {
+        name,
+        email,
+        comment,
+        blogId,
+        blogTitle = '',
+        blogCategory = '',
+        blogImage = ''
+      } = req.body;
+
+      const newComment = {
+        name,
+        email,
+        comment,
+        blogId,
+        blogTitle,
+        blogCategory,
+        blogImage,
+        createdAt: new Date()
+      };
+
+      const result = await commentCollection.insertOne(newComment);
+      res.send(result);
+    });
+
+    app.post('/comment/story', async (req, res) => {
+      const {
+        name,
+        email,
+        comment,
+        storyId,
+        storyTitle = '',
+        storyCategory = '',
+        storyImage = ''
+      } = req.body;
+
+      const newComment = {
+        name,
+        email,
+        comment,
+        storyId,
+        storyTitle,
+        storyCategory,
+        storyImage,
+        createdAt: new Date()
+      };
+
+      const result = await commentCollection.insertOne(newComment);
+      res.send(result);
+    });
+
+
+    app.delete('/comment/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await commentCollection.deleteOne(query);
+      res.send(result);
+    });
+
 
     // story related api
 
@@ -290,6 +358,12 @@ async function run() {
 
     app.get('/blog', async (req, res) => {
       const result = await blogCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.get('/blog/:id', async (req, res) => {
+      const id = req.params.id;
+      const result = await blogCollection.findOne({ _id: new ObjectId(id) });
       res.send(result);
     });
 
