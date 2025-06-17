@@ -25,7 +25,7 @@ const client = new MongoClient(uri, {
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
-    // await client.connect();
+    await client.connect();
     // Send a ping to confirm a successful connection
 
     const usersCollection = client.db("squirrelDb").collection("users");
@@ -35,6 +35,7 @@ async function run() {
     const contactCollection = client.db("squirrelDb").collection("contact");
     const commentCollection = client.db("squirrelDb").collection("comment");
     const storyCollection = client.db("squirrelDb").collection("story");
+    const draftCollection = client.db("squirrelDb").collection("draft");
     const blogCollection = client.db("squirrelDb").collection("blog");
     const newsletterFaqCollection = client.db("squirrelDb").collection("newsletterFaq");
 
@@ -160,6 +161,7 @@ async function run() {
           customerName: item.customerName,
           rating: item.rating,
           review: item.review,
+          random: item.random,
           profileLink: item.profileLink
         }
       };
@@ -346,6 +348,7 @@ async function run() {
         $set: {
           storyTitle: item.storyTitle,
           storyDescription: item.storyDescription,
+          storyRandom: item.storyRandom,
           storyCategory: item.storyCategory,
           storyImage: item.storyImage
         }
@@ -353,6 +356,50 @@ async function run() {
       const result = await storyCollection.updateOne(filter, updatedDoc);
       res.send(result);
     })
+
+    // draft related api
+
+    app.get('/draft', async (req, res) => {
+      const result = await draftCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.get('/draft/:id', async (req, res) => {
+      const id = req.params.id;
+      const result = await draftCollection.findOne({ _id: new ObjectId(id) });
+      res.send(result);
+    });
+
+    app.post('/draft', async (req, res) => {
+      const item = req.body;
+      const result = await draftCollection.insertOne(item);
+      res.send(result);
+    });
+
+    app.delete('/draft/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) }
+      const result = await draftCollection.deleteOne(query);
+      res.send(result);
+    })
+
+    app.patch('/draft/:id', async (req, res) => {
+      const id = req.params.id;
+      const item = req.body;
+      const filter = { _id: new ObjectId(id) };
+      const updatedDoc = {
+        $set: {
+          storyTitle: item.storyTitle,
+          storyDescription: item.storyDescription,
+          storyRandom: item.storyRandom,
+          storyCategory: item.storyCategory,
+          storyImage: item.storyImage
+        }
+      };
+      const result = await draftCollection.updateOne(filter, updatedDoc);
+      res.send(result);
+    })
+
 
     // blog related api
 
@@ -388,6 +435,7 @@ async function run() {
         $set: {
           blogTitle: item.blogTitle,
           blogDescription: item.blogDescription,
+          blogRandom: item.blogRandom,
           blogCategory: item.blogCategory,
           blogImage: item.blogImage
         }
@@ -432,8 +480,8 @@ async function run() {
 
 
 
-    // await client.db("admin").command({ ping: 1 });
-    // console.log("Pinged your deployment. You successfully connected to MongoDB!");
+    await client.db("admin").command({ ping: 1 });
+    console.log("Pinged your deployment. You successfully connected to MongoDB!");
   } finally {
     // Ensures that the client will close when you finish/error
     // await client.close();
