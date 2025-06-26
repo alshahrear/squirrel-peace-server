@@ -327,19 +327,28 @@ async function run() {
       res.send(result);
     });
 
+    app.get('/storyDetails/:id', async (req, res) => {
+      const id = req.params.id;
+      const result = await storyCollection.findOne({ _id: new ObjectId(id) });
+      res.send(result);
+    });
+
+
     app.post('/story', async (req, res) => {
       const item = req.body;
       const result = await storyCollection.insertOne(item);
       res.send(result);
     });
 
+
     app.delete('/story/:id', async (req, res) => {
       const id = req.params.id;
-      const query = { _id: new ObjectId(id) }
+      const query = { _id: new ObjectId(id) };
       const result = await storyCollection.deleteOne(query);
       res.send(result);
-    })
+    });
 
+   
     app.patch('/story/:id', async (req, res) => {
       const id = req.params.id;
       const item = req.body;
@@ -355,7 +364,23 @@ async function run() {
       };
       const result = await storyCollection.updateOne(filter, updatedDoc);
       res.send(result);
-    })
+    });
+
+   
+    app.patch('/storyDetails/:id', async (req, res) => {
+      const id = req.params.id;
+      const item = req.body;
+      const filter = { _id: new ObjectId(id) };
+      const updateDoc = {
+        $set: {
+          storyDate: item.storyDate,
+          storyLongDescription: item.storyLongDescription,
+          storyRandom: item.storyRandom,
+        }
+      };
+      const result = await storyCollection.updateOne(filter, updateDoc);
+      res.send(result);
+    });
 
     // draft related api
 
