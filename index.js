@@ -349,7 +349,7 @@ async function run() {
     app.patch('/story/:id', async (req, res) => {
       const id = req.params.id;
       const item = req.body;
-      
+
       const filter = { _id: new ObjectId(id) };
       const updatedDoc = {
         $set: {
@@ -411,19 +411,37 @@ async function run() {
     app.patch('/draft/:id', async (req, res) => {
       const id = req.params.id;
       const item = req.body;
+      
       const filter = { _id: new ObjectId(id) };
       const updatedDoc = {
         $set: {
-          storyTitle: item.storyTitle,
-          storyDescription: item.storyDescription,
-          storyRandom: item.storyRandom,
-          storyCategory: item.storyCategory,
-          storyImage: item.storyImage
+          draftTitle: item.draftTitle,
+          draftShortDescription: item.draftShortDescription,
+          draftRandom: item.draftRandom,
+          draftCategory: item.draftCategory,
+          draftImage: item.draftImage,
         }
       };
       const result = await draftCollection.updateOne(filter, updatedDoc);
+      console.log("👉 Mongo update result:", result);
       res.send(result);
-    })
+    });
+
+    app.patch('/draftDetails/:id', async (req, res) => {
+      const id = req.params.id;
+      const item = req.body;
+      const filter = { _id: new ObjectId(id) };
+      const updateDoc = {
+        $set: {
+          draftTime: item.draftTime,
+          draftDate: item.draftDate,
+          draftLongDescription: item.draftLongDescription,
+          draftRandom: item.draftRandom,
+        }
+      };
+      const result = await draftCollection.updateOne(filter, updateDoc);
+      res.send(result);
+    });
 
 
     // blog related api
