@@ -333,13 +333,11 @@ async function run() {
       res.send(result);
     });
 
-
     app.post('/story', async (req, res) => {
       const item = req.body;
       const result = await storyCollection.insertOne(item);
       res.send(result);
     });
-
 
     app.delete('/story/:id', async (req, res) => {
       const id = req.params.id;
@@ -348,25 +346,28 @@ async function run() {
       res.send(result);
     });
 
-   
     app.patch('/story/:id', async (req, res) => {
       const id = req.params.id;
       const item = req.body;
+
+      console.log("👉 PATCH incoming story update:", item); 
+      console.log("👉 storyShortDescription:", item.storyShortDescription);
+
       const filter = { _id: new ObjectId(id) };
       const updatedDoc = {
         $set: {
           storyTitle: item.storyTitle,
-          storyDescription: item.storyDescription,
+          storyShortDescription: item.storyShortDescription,
           storyRandom: item.storyRandom,
           storyCategory: item.storyCategory,
-          storyImage: item.storyImage
+          storyImage: item.storyImage,
         }
       };
       const result = await storyCollection.updateOne(filter, updatedDoc);
+      console.log("👉 Mongo update result:", result);
       res.send(result);
     });
 
-   
     app.patch('/storyDetails/:id', async (req, res) => {
       const id = req.params.id;
       const item = req.body;
@@ -381,6 +382,7 @@ async function run() {
       const result = await storyCollection.updateOne(filter, updateDoc);
       res.send(result);
     });
+
 
     // draft related api
 
@@ -459,7 +461,7 @@ async function run() {
       const updatedDoc = {
         $set: {
           blogTitle: item.blogTitle,
-          blogDescription: item.blogDescription,
+          blogShortDescription: item.blogShortDescription,
           blogRandom: item.blogRandom,
           blogCategory: item.blogCategory,
           blogImage: item.blogImage
