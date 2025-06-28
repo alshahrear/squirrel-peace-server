@@ -415,11 +415,11 @@ async function run() {
       const filter = { _id: new ObjectId(id) };
       const updatedDoc = {
         $set: {
-          draftTitle: item.draftTitle,
-          draftShortDescription: item.draftShortDescription,
-          draftRandom: item.draftRandom,
-          draftCategory: item.draftCategory,
-          draftImage: item.draftImage,
+          storyTitle: item.storyTitle,
+          storyShortDescription: item.storyShortDescription,
+          storyRandom: item.storyRandom,
+          storyCategory: item.storyCategory,
+          storyImage: item.storyImage,
         }
       };
       const result = await draftCollection.updateOne(filter, updatedDoc);
@@ -433,10 +433,10 @@ async function run() {
       const filter = { _id: new ObjectId(id) };
       const updateDoc = {
         $set: {
-          draftTime: item.draftTime,
-          draftDate: item.draftDate,
-          draftLongDescription: item.draftLongDescription,
-          draftRandom: item.draftRandom,
+          storyTime: item.storyTime,
+          storyDate: item.storyDate,
+          storyLongDescription: item.storyLongDescription,
+          storyRandom: item.storyRandom,
         }
       };
       const result = await draftCollection.updateOne(filter, updateDoc);
