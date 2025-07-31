@@ -356,7 +356,7 @@ async function run() {
           storyShortDescription: item.storyShortDescription,
           storyRandom: item.storyRandom,
           storyCategory: item.storyCategory,
-          normalImage: item.normalImage,
+          storyImage: item.storyImage,
         }
       };
       const result = await storyCollection.updateOne(filter, updatedDoc);
@@ -374,7 +374,7 @@ async function run() {
           storyDate: item.storyDate,
           storyLongDescription: item.storyLongDescription,
           storyRandom: item.storyRandom,
-          bannerImage: item.bannerImage
+          storyImage: item.storyImage
         }
       };
       const result = await storyCollection.updateOne(filter, updateDoc);
