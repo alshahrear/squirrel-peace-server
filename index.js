@@ -305,7 +305,6 @@ async function run() {
       res.send(result);
     });
 
-
     app.delete('/comment/:id', async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
@@ -357,7 +356,7 @@ async function run() {
           storyShortDescription: item.storyShortDescription,
           storyRandom: item.storyRandom,
           storyCategory: item.storyCategory,
-          storyImage: item.storyImage,
+          normalImage: item.normalImage,
         }
       };
       const result = await storyCollection.updateOne(filter, updatedDoc);
@@ -375,6 +374,7 @@ async function run() {
           storyDate: item.storyDate,
           storyLongDescription: item.storyLongDescription,
           storyRandom: item.storyRandom,
+          bannerImage: item.bannerImage
         }
       };
       const result = await storyCollection.updateOne(filter, updateDoc);
