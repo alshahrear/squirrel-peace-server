@@ -374,7 +374,6 @@ async function run() {
           storyDate: item.storyDate,
           storyLongDescription: item.storyLongDescription,
           storyRandom: item.storyRandom,
-          storyImage: item.storyImage
         }
       };
       const result = await storyCollection.updateOne(filter, updateDoc);
