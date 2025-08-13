@@ -315,29 +315,55 @@ async function run() {
 
     // story related api
 
+    const slugify = require('slugify'); // npm install slugify
+
+    // সব story fetch
     app.get('/story', async (req, res) => {
       const result = await storyCollection.find().toArray();
       res.send(result);
     });
 
+    // story id অনুযায়ী fetch
     app.get('/story/:id', async (req, res) => {
       const id = req.params.id;
       const result = await storyCollection.findOne({ _id: new ObjectId(id) });
       res.send(result);
     });
 
-    app.get('/storyDetails/:id', async (req, res) => {
-      const id = req.params.id;
-      const result = await storyCollection.findOne({ _id: new ObjectId(id) });
-      res.send(result);
+    // story slug অনুযায়ী fetch (SEO-friendly)
+    app.get('/story/slug/:slug', async (req, res) => {
+      try {
+        const slug = req.params.slug;
+        if (!slug) {
+          return res.status(400).json({ error: "Slug is required" });
+        }
+
+        const result = await storyCollection.findOne({ storySlug: slug });
+
+        if (!result) {
+          return res.status(404).json({ error: "Story not found" });
+        }
+
+        res.json(result);
+      } catch (err) {
+        console.error("Error fetching story by slug:", err);
+        res.status(500).json({ error: "Internal server error" });
+      }
     });
 
+    // নতুন story create
     app.post('/story', async (req, res) => {
       const item = req.body;
+
+      // slug তৈরি করা
+      const slug = slugify(item.storyTitle, { lower: true, strict: true });
+      item.storySlug = slug; // MongoDB তে নতুন ফিল্ড
+
       const result = await storyCollection.insertOne(item);
       res.send(result);
     });
 
+    // story delete
     app.delete('/story/:id', async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
@@ -345,11 +371,19 @@ async function run() {
       res.send(result);
     });
 
+    // story update (title, description, category, image)
     app.patch('/story/:id', async (req, res) => {
       const id = req.params.id;
       const item = req.body;
 
       const filter = { _id: new ObjectId(id) };
+
+      // slug update করা, যদি title change হয়
+      let slug = undefined;
+      if (item.storyTitle) {
+        slug = slugify(item.storyTitle, { lower: true, strict: true });
+      }
+
       const updatedDoc = {
         $set: {
           storyTitle: item.storyTitle,
@@ -357,6 +391,7 @@ async function run() {
           storyRandom: item.storyRandom,
           storyCategory: item.storyCategory,
           storyImage: item.storyImage,
+          ...(slug && { storySlug: slug }) // slug only update if title changed
         }
       };
       const result = await storyCollection.updateOne(filter, updatedDoc);
@@ -364,6 +399,7 @@ async function run() {
       res.send(result);
     });
 
+    // story details update (long description, date, time)
     app.patch('/storyDetails/:id', async (req, res) => {
       const id = req.params.id;
       const item = req.body;
@@ -379,7 +415,6 @@ async function run() {
       const result = await storyCollection.updateOne(filter, updateDoc);
       res.send(result);
     });
-
 
     // draft related api
 
