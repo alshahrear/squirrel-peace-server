@@ -2,6 +2,7 @@ const express = require('express');
 const app = express();
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
+const slugify = require('slugify');
 const { MongoClient, ServerApiVersion, ObjectId, } = require('mongodb');
 require('dotenv').config();
 const port = process.env.PORT || 5000;
@@ -409,7 +410,7 @@ async function run() {
     app.patch('/draft/:id', async (req, res) => {
       const id = req.params.id;
       const item = req.body;
-      
+
       const filter = { _id: new ObjectId(id) };
       const updatedDoc = {
         $set: {
@@ -441,26 +442,41 @@ async function run() {
       res.send(result);
     });
 
-
     // blog related api
 
+    // সব blog fetch
     app.get('/blog', async (req, res) => {
       const result = await blogCollection.find().toArray();
       res.send(result);
     });
 
+    // blog id অনুযায়ী fetch
     app.get('/blog/:id', async (req, res) => {
       const id = req.params.id;
       const result = await blogCollection.findOne({ _id: new ObjectId(id) });
       res.send(result);
     });
 
+    // blog slug অনুযায়ী fetch (SEO-friendly)
+    app.get('/blog/slug/:slug', async (req, res) => {
+      const slug = req.params.slug;
+      const result = await blogCollection.findOne({ blogSlug: slug });
+      res.send(result);
+    });
+
+    // নতুন blog create
     app.post('/blog', async (req, res) => {
       const item = req.body;
+
+      // slug তৈরি করা
+      const slug = slugify(item.blogTitle, { lower: true, strict: true });
+      item.blogSlug = slug; // MongoDB তে নতুন ফিল্ড
+
       const result = await blogCollection.insertOne(item);
       res.send(result);
     });
 
+    // blog delete
     app.delete('/blog/:id', async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) }
@@ -468,11 +484,19 @@ async function run() {
       res.send(result);
     })
 
+    // blog update (title, description, category, image)
     app.patch('/blog/:id', async (req, res) => {
       const id = req.params.id;
       const item = req.body;
 
       const filter = { _id: new ObjectId(id) };
+
+      // slug update করা, যদি title change হয়
+      let slug = undefined;
+      if (item.blogTitle) {
+        slug = slugify(item.blogTitle, { lower: true, strict: true });
+      }
+
       const updatedDoc = {
         $set: {
           blogTitle: item.blogTitle,
@@ -480,6 +504,7 @@ async function run() {
           blogRandom: item.blogRandom,
           blogCategory: item.blogCategory,
           blogImage: item.blogImage,
+          ...(slug && { blogSlug: slug }) // slug only update if title changed
         }
       };
       const result = await blogCollection.updateOne(filter, updatedDoc);
@@ -487,6 +512,7 @@ async function run() {
       res.send(result);
     });
 
+    // blog details update (long description, date, time)
     app.patch('/blogDetails/:id', async (req, res) => {
       const id = req.params.id;
       const item = req.body;
@@ -502,6 +528,7 @@ async function run() {
       const result = await blogCollection.updateOne(filter, updateDoc);
       res.send(result);
     });
+
 
     // newsletterFaq related api
 
