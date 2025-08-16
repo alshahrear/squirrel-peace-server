@@ -315,8 +315,6 @@ async function run() {
 
     // story related api
 
-    const slugify = require('slugify'); // npm install slugify
-
     // সব story fetch
     app.get('/story', async (req, res) => {
       const result = await storyCollection.find().toArray();
