@@ -2,6 +2,8 @@ const express = require('express');
 const app = express();
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
+const { SitemapStream, streamToPromise } = require("sitemap");
+const { createGzip } = require("zlib");
 const slugify = require('slugify');
 const { MongoClient, ServerApiVersion, ObjectId, } = require('mongodb');
 require('dotenv').config();
@@ -626,6 +628,63 @@ run().catch(console.dir);
 app.get('/', (req, res) => {
   res.send('Squirrel Peace is running')
 })
+
+// keep-alive route
+app.get('/ping', (req, res) => {
+  res.send('pong');
+});
+
+// ✅ SEO-optimized Sitemap route
+app.get("/sitemap.xml", async (req, res) => {
+  try {
+    res.header("Content-Type", "application/xml");
+    res.header("Content-Encoding", "gzip");
+
+    const smStream = new SitemapStream({ hostname: "https://squirrelpeace.com" });
+    const pipeline = smStream.pipe(createGzip());
+
+    // 👉 Static pages
+    smStream.write({ url: "/", changefreq: "daily", priority: 1.0, lastmod: new Date() });
+    smStream.write({ url: "/about", changefreq: "weekly", priority: 0.8, lastmod: new Date() });
+    smStream.write({ url: "/contact", changefreq: "weekly", priority: 0.8, lastmod: new Date() });
+
+    // 👉 Dynamic blogs
+    const blogs = await client.db("squirrelDb").collection("blog").find().toArray();
+    blogs.forEach((blog) => {
+      if (blog.blogSlug) {
+        smStream.write({
+          url: `/blog/${blog.blogSlug}`,
+          changefreq: "weekly",
+          priority: 0.7,
+          lastmod: blog.updatedAt || blog.createdAt || new Date() // যদি database এ date থাকে
+        });
+      }
+    });
+
+    // 👉 Dynamic stories
+    const stories = await client.db("squirrelDb").collection("story").find().toArray();
+    stories.forEach((story) => {
+      if (story.storySlug) {
+        smStream.write({
+          url: `/story/${story.storySlug}`,
+          changefreq: "weekly",
+          priority: 0.7,
+          lastmod: story.updatedAt || story.createdAt || new Date()
+        });
+      }
+    });
+
+    smStream.end();
+
+    // ✅ Directly pipe to response (gzip handled correctly)
+    pipeline.pipe(res).on("error", (e) => { throw e });
+
+  } catch (e) {
+    console.error("Sitemap generation error:", e);
+    res.status(500).end();
+  }
+});
+
 
 app.listen(port, () => {
   console.log(`Squirrel Peace is sitting on port ${port}`);
