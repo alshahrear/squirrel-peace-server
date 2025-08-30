@@ -561,22 +561,37 @@ async function run() {
       res.send(result);
     });
 
-    // blog details update (long description, date, time)
-    app.patch('/blogDetails/:id', async (req, res) => {
-      const id = req.params.id;
+    
+    // blog details update (long description, date, time) using SLUG
+    app.patch('/blogDetails/slug/:slug', async (req, res) => {
+      const slug = req.params.slug;
       const item = req.body;
-      const filter = { _id: new ObjectId(id) };
-      const updateDoc = {
-        $set: {
-          blogTime: item.blogTime,
-          blogDate: item.blogDate,
-          blogLongDescription: item.blogLongDescription,
-          blogRandom: item.blogRandom,
+
+      try {
+        const filter = { blogSlug: slug };
+
+        const updateDoc = {
+          $set: {
+            blogTime: item.blogTime,
+            blogDate: item.blogDate,
+            blogLongDescription: item.blogLongDescription,
+            blogRandom: item.blogRandom,
+          }
+        };
+
+        const result = await blogCollection.updateOne(filter, updateDoc);
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ error: "Blog not found" });
         }
-      };
-      const result = await blogCollection.updateOne(filter, updateDoc);
-      res.send(result);
+
+        res.send(result);
+      } catch (err) {
+        console.error("Error updating blog by slug:", err);
+        res.status(500).json({ error: "Internal server error" });
+      }
     });
+
 
 
     // newsletterFaq related api
