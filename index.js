@@ -2,7 +2,7 @@ const express = require('express');
 const app = express();
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
-const { SitemapStream, streamToPromise } = require("sitemap");
+const { SitemapStream} = require("sitemap");
 const { createGzip } = require("zlib");
 const slugify = require('slugify');
 const { MongoClient, ServerApiVersion, ObjectId, } = require('mongodb');
@@ -36,9 +36,8 @@ async function run() {
     const faqsAddCollection = client.db("squirrelDb").collection("faqsAdd");
     const contactCollection = client.db("squirrelDb").collection("contact");
     const commentCollection = client.db("squirrelDb").collection("comment");
-    const storyCollection = client.db("squirrelDb").collection("story");
-    const draftCollection = client.db("squirrelDb").collection("draft");
     const blogCollection = client.db("squirrelDb").collection("blog");
+    const draftCollection = client.db("squirrelDb").collection("draft");
     const newsletterFaqCollection = client.db("squirrelDb").collection("newsletterFaq");
 
 
@@ -281,25 +280,25 @@ async function run() {
       res.send(result);
     });
 
-    app.post('/comment/story', async (req, res) => {
+    app.post('/comment/blog', async (req, res) => {
       const {
         name,
         email,
         comment,
-        storyId,
-        storyTitle = '',
-        storyCategory = '',
-        storyImage = ''
+        blogId,
+        blogTitle = '',
+        blogCategory = '',
+        blogImage = ''
       } = req.body;
 
       const newComment = {
         name,
         email,
         comment,
-        storyId,
-        storyTitle,
-        storyCategory,
-        storyImage,
+        blogId,
+        blogTitle,
+        blogCategory,
+        blogImage,
         createdAt: new Date()
       };
 
@@ -315,64 +314,64 @@ async function run() {
     });
 
 
-    // story related api
+    // blog related api
 
-    // সব story fetch
-    app.get('/story', async (req, res) => {
-      const result = await storyCollection.find().toArray();
+    // সব blog fetch
+    app.get('/blog', async (req, res) => {
+      const result = await blogCollection.find().toArray();
       res.send(result);
     });
 
-    // story id অনুযায়ী fetch
-    app.get('/story/:id', async (req, res) => {
+    // blog id অনুযায়ী fetch
+    app.get('/blog/:id', async (req, res) => {
       const id = req.params.id;
-      const result = await storyCollection.findOne({ _id: new ObjectId(id) });
+      const result = await blogCollection.findOne({ _id: new ObjectId(id) });
       res.send(result);
     });
 
-    // story slug অনুযায়ী fetch (SEO-friendly)
-    app.get('/story/slug/:slug', async (req, res) => {
+    // blog slug অনুযায়ী fetch (SEO-friendly)
+    app.get('/blog/slug/:slug', async (req, res) => {
       try {
         const slug = req.params.slug;
         if (!slug) {
           return res.status(400).json({ error: "Slug is required" });
         }
 
-        const result = await storyCollection.findOne({ storySlug: slug });
+        const result = await blogCollection.findOne({ blogSlug: slug });
 
         if (!result) {
-          return res.status(404).json({ error: "Story not found" });
+          return res.status(404).json({ error: "blog not found" });
         }
 
         res.json(result);
       } catch (err) {
-        console.error("Error fetching story by slug:", err);
+        console.error("Error fetching blog by slug:", err);
         res.status(500).json({ error: "Internal server error" });
       }
     });
 
-    // নতুন story create
-    app.post('/story', async (req, res) => {
+    // নতুন blog create
+    app.post('/blog', async (req, res) => {
       const item = req.body;
 
       // slug তৈরি করা
-      const slug = slugify(item.storyTitle, { lower: true, strict: true });
-      item.storySlug = slug; // MongoDB তে নতুন ফিল্ড
+      const slug = slugify(item.blogTitle, { lower: true, strict: true });
+      item.blogSlug = slug; // MongoDB তে নতুন ফিল্ড
 
-      const result = await storyCollection.insertOne(item);
+      const result = await blogCollection.insertOne(item);
       res.send(result);
     });
 
-    // story delete
-    app.delete('/story/:id', async (req, res) => {
+    // blog delete
+    app.delete('/blog/:id', async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
-      const result = await storyCollection.deleteOne(query);
+      const result = await blogCollection.deleteOne(query);
       res.send(result);
     });
 
-    // story update (title, description, category, image)
-    app.patch('/story/:id', async (req, res) => {
+    // blog update (title, description, category, image)
+    app.patch('/blog/:id', async (req, res) => {
       const id = req.params.id;
       const item = req.body;
 
@@ -380,39 +379,39 @@ async function run() {
 
       // slug update করা, যদি title change হয়
       let slug = undefined;
-      if (item.storyTitle) {
-        slug = slugify(item.storyTitle, { lower: true, strict: true });
+      if (item.blogTitle) {
+        slug = slugify(item.blogTitle, { lower: true, strict: true });
       }
 
       const updatedDoc = {
         $set: {
-          storyTitle: item.storyTitle,
-          storyShortDescription: item.storyShortDescription,
-          storyRandom: item.storyRandom,
-          storyCategory: item.storyCategory,
-          storyImage: item.storyImage,
-          ...(slug && { storySlug: slug }) // slug only update if title changed
+          blogTitle: item.blogTitle,
+          blogShortDescription: item.blogShortDescription,
+          blogRandom: item.blogRandom,
+          blogCategory: item.blogCategory,
+          blogImage: item.blogImage,
+          ...(slug && { blogSlug: slug }) // slug only update if title changed
         }
       };
-      const result = await storyCollection.updateOne(filter, updatedDoc);
+      const result = await blogCollection.updateOne(filter, updatedDoc);
       console.log("👉 Mongo update result:", result);
       res.send(result);
     });
 
-    // story details update (long description, date, time)
-    app.patch('/storyDetails/:id', async (req, res) => {
+    // blog details update (long description, date, time)
+    app.patch('/blogDetails/:id', async (req, res) => {
       const id = req.params.id;
       const item = req.body;
       const filter = { _id: new ObjectId(id) };
       const updateDoc = {
         $set: {
-          storyTime: item.storyTime,
-          storyDate: item.storyDate,
-          storyLongDescription: item.storyLongDescription,
-          storyRandom: item.storyRandom,
+          blogTime: item.blogTime,
+          blogDate: item.blogDate,
+          blogLongDescription: item.blogLongDescription,
+          blogRandom: item.blogRandom,
         }
       };
-      const result = await storyCollection.updateOne(filter, updateDoc);
+      const result = await blogCollection.updateOne(filter, updateDoc);
       res.send(result);
     });
 
@@ -449,11 +448,11 @@ async function run() {
       const filter = { _id: new ObjectId(id) };
       const updatedDoc = {
         $set: {
-          storyTitle: item.storyTitle,
-          storyShortDescription: item.storyShortDescription,
-          storyRandom: item.storyRandom,
-          storyCategory: item.storyCategory,
-          storyImage: item.storyImage,
+          blogTitle: item.blogTitle,
+          blogShortDescription: item.blogShortDescription,
+          blogRandom: item.blogRandom,
+          blogCategory: item.blogCategory,
+          blogImage: item.blogImage,
         }
       };
       const result = await draftCollection.updateOne(filter, updatedDoc);
@@ -467,132 +466,15 @@ async function run() {
       const filter = { _id: new ObjectId(id) };
       const updateDoc = {
         $set: {
-          storyTime: item.storyTime,
-          storyDate: item.storyDate,
-          storyLongDescription: item.storyLongDescription,
-          storyRandom: item.storyRandom,
+          blogTime: item.blogTime,
+          blogDate: item.blogDate,
+          blogLongDescription: item.blogLongDescription,
+          blogRandom: item.blogRandom,
         }
       };
       const result = await draftCollection.updateOne(filter, updateDoc);
       res.send(result);
     });
-
-    // blog related api
-
-    // সব blog fetch
-    app.get('/blog', async (req, res) => {
-      const result = await blogCollection.find().toArray();
-      res.send(result);
-    });
-
-    // blog id অনুযায়ী fetch
-    app.get('/blog/:id', async (req, res) => {
-      const id = req.params.id;
-      const result = await blogCollection.findOne({ _id: new ObjectId(id) });
-      res.send(result);
-    });
-
-    // blog slug অনুযায়ী fetch (SEO-friendly)
-    app.get('/blog/slug/:slug', async (req, res) => {
-      try {
-        const slug = req.params.slug;
-        if (!slug) {
-          return res.status(400).json({ error: "Slug is required" });
-        }
-
-        const result = await blogCollection.findOne({ blogSlug: slug });
-
-        if (!result) {
-          return res.status(404).json({ error: "Blog not found" });
-        }
-
-        res.json(result);
-      } catch (err) {
-        console.error("Error fetching blog by slug:", err);
-        res.status(500).json({ error: "Internal server error" });
-      }
-    });
-
-    // নতুন blog create
-    app.post('/blog', async (req, res) => {
-      const item = req.body;
-
-      // slug তৈরি করা
-      const slug = slugify(item.blogTitle, { lower: true, strict: true });
-      item.blogSlug = slug; // MongoDB তে নতুন ফিল্ড
-
-      const result = await blogCollection.insertOne(item);
-      res.send(result);
-    });
-
-    // blog delete
-    app.delete('/blog/:id', async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) }
-      const result = await blogCollection.deleteOne(query);
-      res.send(result);
-    })
-
-    // blog update (title, description, category, image)
-    app.patch('/blog/:id', async (req, res) => {
-      const id = req.params.id;
-      const item = req.body;
-
-      const filter = { _id: new ObjectId(id) };
-
-      // slug update করা, যদি title change হয়
-      let slug = undefined;
-      if (item.blogTitle) {
-        slug = slugify(item.blogTitle, { lower: true, strict: true });
-      }
-
-      const updatedDoc = {
-        $set: {
-          blogTitle: item.blogTitle,
-          blogShortDescription: item.blogShortDescription,
-          blogRandom: item.blogRandom,
-          blogCategory: item.blogCategory,
-          blogImage: item.blogImage,
-          ...(slug && { blogSlug: slug }) // slug only update if title changed
-        }
-      };
-      const result = await blogCollection.updateOne(filter, updatedDoc);
-      console.log("👉 Mongo update result:", result);
-      res.send(result);
-    });
-
-    
-    // blog details update (long description, date, time) using SLUG
-    app.patch('/blogDetails/slug/:slug', async (req, res) => {
-      const slug = req.params.slug;
-      const item = req.body;
-
-      try {
-        const filter = { blogSlug: slug };
-
-        const updateDoc = {
-          $set: {
-            blogTime: item.blogTime,
-            blogDate: item.blogDate,
-            blogLongDescription: item.blogLongDescription,
-            blogRandom: item.blogRandom,
-          }
-        };
-
-        const result = await blogCollection.updateOne(filter, updateDoc);
-
-        if (result.matchedCount === 0) {
-          return res.status(404).json({ error: "Blog not found" });
-        }
-
-        res.send(result);
-      } catch (err) {
-        console.error("Error updating blog by slug:", err);
-        res.status(500).json({ error: "Internal server error" });
-      }
-    });
-
-
 
     // newsletterFaq related api
 
@@ -649,7 +531,7 @@ app.get('/ping', (req, res) => {
   res.send('pong');
 });
 
-// ✅ SEO-optimized Sitemap route
+// ✅ SEO-optimized Sitemap route (Only Blogs + Static Pages)
 app.get("/sitemap.xml", async (req, res) => {
   try {
     res.header("Content-Type", "application/xml");
@@ -663,7 +545,7 @@ app.get("/sitemap.xml", async (req, res) => {
     smStream.write({ url: "/about", changefreq: "weekly", priority: 0.8, lastmod: new Date() });
     smStream.write({ url: "/contact", changefreq: "weekly", priority: 0.8, lastmod: new Date() });
 
-    // 👉 Dynamic blogs
+    // 👉 Dynamic Blogs (✅ Only Blogs)
     const blogs = await client.db("squirrelDb").collection("blog").find().toArray();
     blogs.forEach((blog) => {
       if (blog.blogSlug) {
@@ -671,20 +553,7 @@ app.get("/sitemap.xml", async (req, res) => {
           url: `/blog/${blog.blogSlug}`,
           changefreq: "weekly",
           priority: 0.7,
-          lastmod: blog.updatedAt || blog.createdAt || new Date() // যদি database এ date থাকে
-        });
-      }
-    });
-
-    // 👉 Dynamic stories
-    const stories = await client.db("squirrelDb").collection("story").find().toArray();
-    stories.forEach((story) => {
-      if (story.storySlug) {
-        smStream.write({
-          url: `/story/${story.storySlug}`,
-          changefreq: "weekly",
-          priority: 0.7,
-          lastmod: story.updatedAt || story.createdAt || new Date()
+          lastmod: blog.updatedAt || blog.createdAt || new Date()
         });
       }
     });
@@ -699,6 +568,7 @@ app.get("/sitemap.xml", async (req, res) => {
     res.status(500).end();
   }
 });
+
 
 
 app.listen(port, () => {
