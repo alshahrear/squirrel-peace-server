@@ -2,7 +2,7 @@ const express = require('express');
 const app = express();
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
-const { SitemapStream} = require("sitemap");
+const { SitemapStream } = require("sitemap");
 const { createGzip } = require("zlib");
 const slugify = require('slugify');
 const { MongoClient, ServerApiVersion, ObjectId, } = require('mongodb');
@@ -259,7 +259,7 @@ async function run() {
         name,
         email,
         comment,
-        blogId,
+        blogSlug,
         blogTitle = '',
         blogCategory = '',
         blogImage = ''
@@ -269,33 +269,7 @@ async function run() {
         name,
         email,
         comment,
-        blogId,
-        blogTitle,
-        blogCategory,
-        blogImage,
-        createdAt: new Date()
-      };
-
-      const result = await commentCollection.insertOne(newComment);
-      res.send(result);
-    });
-
-    app.post('/comment/blog', async (req, res) => {
-      const {
-        name,
-        email,
-        comment,
-        blogId,
-        blogTitle = '',
-        blogCategory = '',
-        blogImage = ''
-      } = req.body;
-
-      const newComment = {
-        name,
-        email,
-        comment,
-        blogId,
+        blogSlug,
         blogTitle,
         blogCategory,
         blogImage,
