@@ -34,6 +34,8 @@ async function run() {
     const testimonialsCollection = client.db("squirrelDb").collection("reviews");
     const faqsCollection = client.db("squirrelDb").collection("faqs");
     const faqsAddCollection = client.db("squirrelDb").collection("faqsAdd");
+    const quizFaqsCollection = client.db("squirrelDb").collection("quizFaqs");
+    const quizFaqsAddCollection = client.db("squirrelDb").collection("quizFaqsAdd");
     const contactCollection = client.db("squirrelDb").collection("contact");
     const commentCollection = client.db("squirrelDb").collection("comment");
     const blogCollection = client.db("squirrelDb").collection("blog");
@@ -190,6 +192,28 @@ async function run() {
       res.send(result);
     })
 
+
+    // Quiz faq related api
+
+    app.get('/faqs', async (req, res) => {
+      const result = await quizFaqsCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.post('/faqs', async (req, res) => {
+      const item = req.body;
+      const result = await quizFaqsCollection.insertOne(item);
+      res.send(result);
+    });
+
+    app.delete('/faqs/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) }
+      const result = await quizFaqsCollection.deleteOne(query);
+      res.send(result);
+    })
+
+
     // faq add related api
 
     app.get('/faqsAdd', async (req, res) => {
@@ -221,6 +245,41 @@ async function run() {
         }
       };
       const result = await faqsAddCollection.updateOne(filter, updatedDoc);
+      res.send(result);
+    });
+
+
+    // Quiz faq add related api
+
+    app.get('/faqsAdd', async (req, res) => {
+      const result = await quizFaqsAddCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.post('/faqsAdd', async (req, res) => {
+      const item = req.body;
+      const result = await quizFaqsAddCollection.insertOne(item);
+      res.send(result);
+    });
+
+    app.delete('/faqsAdd/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) }
+      const result = await quizFaqsAddCollection.deleteOne(query);
+      res.send(result);
+    })
+
+    app.patch('/faqsAdd/:id', async (req, res) => {
+      const id = req.params.id;
+      const item = req.body;
+      const filter = { _id: new ObjectId(id) };
+      const updatedDoc = {
+        $set: {
+          faqQuestion: item.faqQuestion,
+          faqAnswer: item.faqAnswer
+        }
+      };
+      const result = await quizFaqsAddCollection.updateOne(filter, updatedDoc);
       res.send(result);
     });
 
