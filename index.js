@@ -195,18 +195,18 @@ async function run() {
 
     // Quiz faq related api
 
-    app.get('/faqs', async (req, res) => {
+    app.get('/quizFaqs', async (req, res) => {
       const result = await quizFaqsCollection.find().toArray();
       res.send(result);
     });
 
-    app.post('/faqs', async (req, res) => {
+    app.post('/quizFaqs', async (req, res) => {
       const item = req.body;
       const result = await quizFaqsCollection.insertOne(item);
       res.send(result);
     });
 
-    app.delete('/faqs/:id', async (req, res) => {
+    app.delete('/quizFaqs/:id', async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) }
       const result = await quizFaqsCollection.deleteOne(query);
@@ -251,25 +251,25 @@ async function run() {
 
     // Quiz faq add related api
 
-    app.get('/faqsAdd', async (req, res) => {
+    app.get('/quizFaqsAdd', async (req, res) => {
       const result = await quizFaqsAddCollection.find().toArray();
       res.send(result);
     });
 
-    app.post('/faqsAdd', async (req, res) => {
+    app.post('/quizFaqsAdd', async (req, res) => {
       const item = req.body;
       const result = await quizFaqsAddCollection.insertOne(item);
       res.send(result);
     });
 
-    app.delete('/faqsAdd/:id', async (req, res) => {
+    app.delete('/quizFaqsAdd/:id', async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) }
       const result = await quizFaqsAddCollection.deleteOne(query);
       res.send(result);
     })
 
-    app.patch('/faqsAdd/:id', async (req, res) => {
+    app.patch('/quizFaqsAdd/:id', async (req, res) => {
       const id = req.params.id;
       const item = req.body;
       const filter = { _id: new ObjectId(id) };
