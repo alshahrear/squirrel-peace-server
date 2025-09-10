@@ -248,7 +248,6 @@ async function run() {
       res.send(result);
     });
 
-
     // Quiz faq add related api
 
     app.get('/quizFaqsAdd', async (req, res) => {
@@ -257,30 +256,52 @@ async function run() {
     });
 
     app.post('/quizFaqsAdd', async (req, res) => {
-      const item = req.body;
-      const result = await quizFaqsAddCollection.insertOne(item);
-      res.send(result);
+      try {
+        const item = req.body;
+        const result = await quizFaqsAddCollection.insertOne(item);
+    
+        res.send({ insertedId: result.insertedId });
+      } catch (error) {
+        console.error("Insert error:", error);
+        res.status(500).send({ error: "Insert failed" });
+      }
     });
 
     app.delete('/quizFaqsAdd/:id', async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) }
-      const result = await quizFaqsAddCollection.deleteOne(query);
-      res.send(result);
-    })
+      try {
+        const id = req.params.id;
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ error: "Invalid ID format" });
+        }
+        const query = { _id: new ObjectId(id) };
+        const result = await quizFaqsAddCollection.deleteOne(query);
+        res.send(result);
+      } catch (error) {
+        console.error("Delete error:", error);
+        res.status(500).send({ error: "Delete failed" });
+      }
+    });
 
     app.patch('/quizFaqsAdd/:id', async (req, res) => {
-      const id = req.params.id;
-      const item = req.body;
-      const filter = { _id: new ObjectId(id) };
-      const updatedDoc = {
-        $set: {
-          faqQuestion: item.faqQuestion,
-          faqAnswer: item.faqAnswer
+      try {
+        const id = req.params.id;
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ error: "Invalid ID format" });
         }
-      };
-      const result = await quizFaqsAddCollection.updateOne(filter, updatedDoc);
-      res.send(result);
+        const item = req.body;
+        const filter = { _id: new ObjectId(id) };
+        const updatedDoc = {
+          $set: {
+            faqQuestion: item.faqQuestion,
+            faqAnswer: item.faqAnswer,
+          },
+        };
+        const result = await quizFaqsAddCollection.updateOne(filter, updatedDoc);
+        res.send(result);
+      } catch (error) {
+        console.error("Update error:", error);
+        res.status(500).send({ error: "Update failed" });
+      }
     });
 
     // contact related api
