@@ -39,6 +39,7 @@ async function run() {
     const contactCollection = client.db("squirrelDb").collection("contact");
     const commentCollection = client.db("squirrelDb").collection("comment");
     const blogCollection = client.db("squirrelDb").collection("blog");
+    const winnerCollection = client.db("squirrelDb").collection("winner");
     const draftCollection = client.db("squirrelDb").collection("draft");
     const newsletterFaqCollection = client.db("squirrelDb").collection("newsletterFaq");
 
@@ -304,6 +305,7 @@ async function run() {
       }
     });
 
+   
     // contact related api
 
     // Only admin can get all contacts
@@ -468,6 +470,26 @@ async function run() {
       const result = await blogCollection.updateOne(filter, updateDoc);
       res.send(result);
     });
+
+     // winner related api
+
+    app.get('/winner', async (req, res) => {
+      const result = await winnerCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.get('/winner/:id', async (req, res) => {
+      const id = req.params.id;
+      const result = await winnerCollection.findOne({ _id: new ObjectId(id) });
+      res.send(result);
+    });
+
+    app.post('/winner', async (req, res) => {
+      const item = req.body;
+      const result = await winnerCollection.insertOne(item);
+      res.send(result);
+    });
+
 
     // draft related api
 
