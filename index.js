@@ -490,6 +490,13 @@ async function run() {
       res.send(result);
     });
 
+    app.delete('/winner/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) }
+      const result = await winnerCollection.deleteOne(query);
+      res.send(result);
+    })
+
 
     // draft related api
 
