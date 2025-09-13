@@ -37,6 +37,7 @@ async function run() {
     const quizFaqsCollection = client.db("squirrelDb").collection("quizFaqs");
     const quizFaqsAddCollection = client.db("squirrelDb").collection("quizFaqsAdd");
     const quizTermsCollection = client.db("squirrelDb").collection("quizTerms");
+    const quizNextCollection = client.db("squirrelDb").collection("quizNext");
     const contactCollection = client.db("squirrelDb").collection("contact");
     const commentCollection = client.db("squirrelDb").collection("comment");
     const blogCollection = client.db("squirrelDb").collection("blog");
@@ -307,7 +308,43 @@ async function run() {
     });
 
 
-    // quiz terms collection
+    // quiz next collection
+
+    app.get('/quizNext', async (req, res) => {
+      const result = await quizNextCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.post('/quizNext', async (req, res) => {
+      const item = req.body;
+      const result = await quizNextCollection.insertOne(item);
+      res.send(result);
+    });
+
+    app.delete('/quizNext/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) }
+      const result = await quizNextCollection.deleteOne(query);
+      res.send(result);
+    })
+
+    app.patch('/quizNext/:id', async (req, res) => {
+      const id = req.params.id;
+      const item = req.body;
+      const filter = { _id: new ObjectId(id) };
+      const updatedDoc = {
+        $set: {
+          quizNext: item.quizNext,
+          quizOn: item.quizOn,
+          quizOff: item.quizOff,
+        }
+      };
+      const result = await quizNextCollection.updateOne(filter, updatedDoc);
+      res.send(result);
+    });
+
+
+    // quiz terms related api
 
     app.get('/quizTerms', async (req, res) => {
       const result = await quizTermsCollection.find().toArray();
