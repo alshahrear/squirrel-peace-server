@@ -44,6 +44,7 @@ async function run() {
     const winnerCollection = client.db("squirrelDb").collection("winner");
     const draftCollection = client.db("squirrelDb").collection("draft");
     const newsletterFaqCollection = client.db("squirrelDb").collection("newsletterFaq");
+    const quizToggleCollection = client.db("squirrelDb").collection("quizToggle");
 
 
     // jwt related api
@@ -194,6 +195,39 @@ async function run() {
       const result = await faqsCollection.deleteOne(query);
       res.send(result);
     })
+
+    // ✅ Get current toggle state
+    app.get("/quizToggle", async (req, res) => {
+      try {
+        let toggle = await quizToggleCollection.findOne({});
+        if (!toggle) {
+          // default state
+          toggle = { isQuizEnabled: false };
+          await quizToggleCollection.insertOne(toggle);
+        }
+        res.send(toggle);
+      } catch (err) {
+        console.error("Error fetching toggle:", err);
+        res.status(500).send({ message: "Failed to fetch toggle state" });
+      }
+    });
+
+
+    // ✅ Update toggle state 
+    app.patch("/quizToggle", verifyToken, verifyAdmin, async (req, res) => {
+      try {
+        const { isQuizEnabled } = req.body;
+        const updateResult = await quizToggleCollection.updateOne(
+          {}, // only one document
+          { $set: { isQuizEnabled: !!isQuizEnabled } },
+          { upsert: true }
+        );
+        res.send({ message: "Toggle updated", isQuizEnabled });
+      } catch (err) {
+        console.error("Error updating toggle:", err);
+        res.status(500).send({ message: "Failed to update toggle" });
+      }
+    });
 
 
     // Quiz faq related api
