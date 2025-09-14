@@ -262,7 +262,7 @@ async function run() {
       try {
         const item = req.body;
         const result = await quizFaqsAddCollection.insertOne(item);
-    
+
         res.send({ insertedId: result.insertedId });
       } catch (error) {
         console.error("Insert error:", error);
@@ -310,6 +310,7 @@ async function run() {
 
     // quiz next collection
 
+
     app.get('/quizNext', async (req, res) => {
       const result = await quizNextCollection.find().toArray();
       res.send(result);
@@ -317,26 +318,40 @@ async function run() {
 
     app.post('/quizNext', async (req, res) => {
       const item = req.body;
+      // যদি client থেকে না আসে তবে default isSelected false
+      if (item.isSelected === undefined) {
+        item.isSelected = false;
+      }
       const result = await quizNextCollection.insertOne(item);
       res.send(result);
     });
 
     app.delete('/quizNext/:id', async (req, res) => {
       const id = req.params.id;
-      const query = { _id: new ObjectId(id) }
+      const query = { _id: new ObjectId(id) };
       const result = await quizNextCollection.deleteOne(query);
       res.send(result);
-    })
+    });
 
     app.patch('/quizNext/:id', async (req, res) => {
       const id = req.params.id;
       const item = req.body;
       const filter = { _id: new ObjectId(id) };
+
       const updatedDoc = {
-        $set: {
-          quizNext: item.quizNext,
-        }
+        $set: {}
       };
+
+      // শুধু quizNext এলে সেট করবে
+      if (item.quizNext !== undefined) {
+        updatedDoc.$set.quizNext = item.quizNext;
+      }
+
+      // শুধু isSelected এলে সেট করবে
+      if (item.isSelected !== undefined) {
+        updatedDoc.$set.isSelected = item.isSelected;
+      }
+
       const result = await quizNextCollection.updateOne(filter, updatedDoc);
       res.send(result);
     });
@@ -374,7 +389,7 @@ async function run() {
       const result = await quizTermsCollection.updateOne(filter, updatedDoc);
       res.send(result);
     });
-   
+
     // contact related api
 
     // Only admin can get all contacts
@@ -540,7 +555,7 @@ async function run() {
       res.send(result);
     });
 
-     // winner related api
+    // winner related api
 
     app.get('/winner', async (req, res) => {
       const result = await winnerCollection.find().toArray();
