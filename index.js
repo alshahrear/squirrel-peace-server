@@ -335,8 +335,6 @@ async function run() {
       const updatedDoc = {
         $set: {
           quizNext: item.quizNext,
-          quizOn: item.quizOn,
-          quizOff: item.quizOff,
         }
       };
       const result = await quizNextCollection.updateOne(filter, updatedDoc);
