@@ -45,6 +45,7 @@ async function run() {
     const draftCollection = client.db("squirrelDb").collection("draft");
     const newsletterFaqCollection = client.db("squirrelDb").collection("newsletterFaq");
     const quizToggleCollection = client.db("squirrelDb").collection("quizToggle");
+    const quizOtpCollection = client.db("squirrelDb").collection("quizOtp");
 
 
     // jwt related api
@@ -421,6 +422,41 @@ async function run() {
         }
       };
       const result = await quizTermsCollection.updateOne(filter, updatedDoc);
+      res.send(result);
+    });
+
+
+    // quiz otp related api
+
+    app.get('/quizOtp', async (req, res) => {
+      const result = await quizOtpCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.post('/quizOtp', async (req, res) => {
+      const item = req.body;
+      const result = await quizOtpCollection.insertOne(item);
+      res.send(result);
+    });
+
+    app.delete('/quizOtp/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) }
+      const result = await quizOtpCollection.deleteOne(query);
+      res.send(result);
+    })
+
+    app.patch('/quizOtp/:id', async (req, res) => {
+      const id = req.params.id;
+      const item = req.body;
+      const filter = { _id: new ObjectId(id) };
+      const updatedDoc = {
+        $set: {
+          quizOtp: item.quizOtp,
+          quizQus: item.quizQus,
+        }
+      };
+      const result = await quizOtpCollection.updateOne(filter, updatedDoc);
       res.send(result);
     });
 
