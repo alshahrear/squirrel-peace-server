@@ -46,6 +46,7 @@ async function run() {
     const newsletterFaqCollection = client.db("squirrelDb").collection("newsletterFaq");
     const quizToggleCollection = client.db("squirrelDb").collection("quizToggle");
     const quizOtpCollection = client.db("squirrelDb").collection("quizOtp");
+    const quizTestCollection = client.db("squirrelDb").collection("quizTest");
 
 
     // jwt related api
@@ -459,6 +460,27 @@ async function run() {
       const result = await quizOtpCollection.updateOne(filter, updatedDoc);
       res.send(result);
     });
+
+    // quiz test related api
+
+    app.get('/quizTest', async (req, res) => {
+      const result = await quizTestCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.post('/quizTest', async (req, res) => {
+      const item = req.body;
+      const result = await quizTestCollection.insertOne(item);
+      res.send(result);
+    });
+
+    app.delete('/quizTest/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await quizTestCollection.deleteOne(query);
+      res.send(result);
+    });
+
 
     // contact related api
 
