@@ -436,6 +436,10 @@ async function run() {
 
     app.post('/quizOtp', async (req, res) => {
       const item = req.body;
+      // default false if not provided
+      if (item.requireImage === undefined) {
+        item.requireImage = false;
+      }
       const result = await quizOtpCollection.insertOne(item);
       res.send(result);
     });
@@ -445,7 +449,7 @@ async function run() {
       const query = { _id: new ObjectId(id) }
       const result = await quizOtpCollection.deleteOne(query);
       res.send(result);
-    })
+    });
 
     app.patch('/quizOtp/:id', async (req, res) => {
       const id = req.params.id;
@@ -455,11 +459,13 @@ async function run() {
         $set: {
           quizOtp: item.quizOtp,
           quizQus: item.quizQus,
+          requireImage: item.requireImage ?? false, // ✅ toggle save
         }
       };
       const result = await quizOtpCollection.updateOne(filter, updatedDoc);
       res.send(result);
     });
+
 
     // quiz test related api
 
