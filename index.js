@@ -481,6 +481,23 @@ async function run() {
       res.send(result);
     });
 
+    // Delete all quiz tests
+    app.delete('/quizTest', async (req, res) => {
+      try {
+        const result = await quizTestCollection.deleteMany({});
+        res.send({
+          success: true,
+          message: `${result.deletedCount} quiz tests deleted successfully`,
+        });
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({
+          success: false,
+          message: 'Failed to delete all quiz tests',
+        });
+      }
+    });
+
 
     // contact related api
 
