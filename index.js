@@ -748,9 +748,9 @@ async function run() {
       const filter = { _id: new ObjectId(id) };
       const updateDoc = {
         $set: {
-          blogTime: item.blogTime,
-          blogDate: item.blogDate,
-          blogLongDescription: item.blogLongDescription,
+          storyTime: item.storyTime,
+          storyDate: item.storyDate,
+          storyLongDescription: item.storyLongDescription,
           storyRandom: item.storyRandom,
         }
       };
