@@ -721,7 +721,7 @@ async function run() {
       const query = { _id: new ObjectId(id) }
       const result = await draftCollection.deleteOne(query);
       res.send(result);
-    })
+    });
 
     app.patch('/draft/:id', async (req, res) => {
       const id = req.params.id;
@@ -730,11 +730,11 @@ async function run() {
       const filter = { _id: new ObjectId(id) };
       const updatedDoc = {
         $set: {
-          blogTitle: item.blogTitle,
-          blogShortDescription: item.blogShortDescription,
-          blogRandom: item.blogRandom,
-          blogCategory: item.blogCategory,
-          blogImage: item.blogImage,
+          storyTitle: item.storyTitle,
+          storyShortDescription: item.storyShortDescription,
+          storyRandom: item.storyRandom,
+          storyCategory: item.storyCategory,
+          storyImage: item.storyImage,
         }
       };
       const result = await draftCollection.updateOne(filter, updatedDoc);
@@ -751,7 +751,7 @@ async function run() {
           blogTime: item.blogTime,
           blogDate: item.blogDate,
           blogLongDescription: item.blogLongDescription,
-          blogRandom: item.blogRandom,
+          storyRandom: item.storyRandom,
         }
       };
       const result = await draftCollection.updateOne(filter, updateDoc);
