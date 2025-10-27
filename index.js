@@ -460,6 +460,7 @@ async function run() {
           quizOtp: item.quizOtp,
           quizQus: item.quizQus,
           requireImage: item.requireImage ?? false, // ✅ toggle save
+          quizDateText: item.quizDateText || "",    // ✅ new field
         }
       };
       const result = await quizOtpCollection.updateOne(filter, updatedDoc);
