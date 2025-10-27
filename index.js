@@ -9,9 +9,19 @@ const { MongoClient, ServerApiVersion, ObjectId, } = require('mongodb');
 require('dotenv').config();
 const port = process.env.PORT || 5000;
 
+//  নতুন ২টা লাইন এখানে যোগ করো
+const multer = require("multer");
+const path = require("path");
+
 // middleware
 app.use(cors());
 app.use(express.json());
+
+//  uploads/videos ফোল্ডার serve করার জন্য এই লাইনটা যোগ করো
+app.use("/uploads/videos", express.static(path.join(process.cwd(), "uploads/videos")));
+
+//  Multer সেটআপ
+const upload = multer({ dest: "uploads/videos/" });
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.3wtib.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
 
@@ -427,31 +437,36 @@ async function run() {
     });
 
 
-    // quiz otp related api
-
-    app.get('/quizOtp', async (req, res) => {
+    // ✅ Get all quiz otp
+    app.get("/quizOtp", async (req, res) => {
       const result = await quizOtpCollection.find().toArray();
       res.send(result);
     });
 
-    app.post('/quizOtp', async (req, res) => {
+    // ✅ Create new quiz otp
+    app.post("/quizOtp", async (req, res) => {
       const item = req.body;
-      // default false if not provided
       if (item.requireImage === undefined) {
         item.requireImage = false;
+      }
+      // default: no video
+      if (!item.quizVideo) {
+        item.quizVideo = "";
       }
       const result = await quizOtpCollection.insertOne(item);
       res.send(result);
     });
 
-    app.delete('/quizOtp/:id', async (req, res) => {
+    // ✅ Delete quiz otp
+    app.delete("/quizOtp/:id", async (req, res) => {
       const id = req.params.id;
-      const query = { _id: new ObjectId(id) }
+      const query = { _id: new ObjectId(id) };
       const result = await quizOtpCollection.deleteOne(query);
       res.send(result);
     });
 
-    app.patch('/quizOtp/:id', async (req, res) => {
+    // ✅ Update quiz otp (including video link)
+    app.patch("/quizOtp/:id", async (req, res) => {
       const id = req.params.id;
       const item = req.body;
       const filter = { _id: new ObjectId(id) };
@@ -459,12 +474,23 @@ async function run() {
         $set: {
           quizOtp: item.quizOtp,
           quizQus: item.quizQus,
-          requireImage: item.requireImage ?? false, // ✅ toggle save
-          quizDateText: item.quizDateText || "",    // ✅ new field
-        }
+          requireImage: item.requireImage ?? false,
+          quizDateText: item.quizDateText || "",
+          quizVideo: item.quizVideo || "", // ✅ video link save
+        },
       };
       const result = await quizOtpCollection.updateOne(filter, updatedDoc);
       res.send(result);
+    });
+
+    // ✅ Upload video file (handled via multer)
+    app.post("/quizOtp/uploadVideo", upload.single("video"), (req, res) => {
+      if (!req.file) {
+        return res.status(400).send({ success: false, message: "No video uploaded" });
+      }
+
+      const videoUrl = `${req.protocol}://${req.get("host")}/uploads/videos/${req.file.filename}`;
+      res.send({ success: true, url: videoUrl });
     });
 
 
