@@ -451,21 +451,31 @@ async function run() {
       res.send(result);
     });
 
+    // ✅ Quiz OTP Update API (with optional YouTube video)
     app.patch('/quizOtp/:id', async (req, res) => {
-      const id = req.params.id;
-      const item = req.body;
-      const filter = { _id: new ObjectId(id) };
-      const updatedDoc = {
-        $set: {
-          quizOtp: item.quizOtp,
-          quizQus: item.quizQus,
-          requireImage: item.requireImage ?? false, // ✅ toggle save
-          quizDateText: item.quizDateText || "",    // ✅ new field
-        }
-      };
-      const result = await quizOtpCollection.updateOne(filter, updatedDoc);
-      res.send(result);
+      try {
+        const id = req.params.id;
+        const item = req.body;
+        const filter = { _id: new ObjectId(id) };
+
+        const updatedDoc = {
+          $set: {
+            quizOtp: item.quizOtp,
+            quizQus: item.quizQus,
+            requireImage: item.requireImage ?? false, // ✅ toggle save
+            quizDateText: item.quizDateText || "",    // ✅ date field
+            youtubeUrl: item.youtubeUrl || "",        // ✅ new YouTube field
+          },
+        };
+
+        const result = await quizOtpCollection.updateOne(filter, updatedDoc);
+        res.send(result);
+      } catch (err) {
+        console.error("❌ quizOtp PATCH error:", err);
+        res.status(500).send({ message: "Internal server error" });
+      }
     });
+
 
 
     // quiz test related api
