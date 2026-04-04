@@ -47,6 +47,9 @@ async function run() {
     const quizToggleCollection = client.db("squirrelDb").collection("quizToggle");
     const quizOtpCollection = client.db("squirrelDb").collection("quizOtp");
     const quizTestCollection = client.db("squirrelDb").collection("quizTest");
+    const productsCollection = client.db("squirrelDb").collection("products");
+    const unitCollection = client.db("squirrelDb").collection("unit");
+    const itemCollection = client.db("squirrelDb").collection("item");
 
 
     // jwt related api
@@ -803,6 +806,171 @@ async function run() {
       res.send(result);
     });
 
+
+
+
+    // Unit related API
+
+    app.get('/unit', async (req, res) => {
+      const result = await unitCollection.find().sort({ order: 1 }).toArray(); // Order অনুযায়ী সর্ট হবে
+      res.send(result);
+    });
+
+    app.post('/unit', async (req, res) => {
+      const item = req.body;
+      // নতুন আইটেমকে শেষে রাখার জন্য কাউন্ট চেক করা যেতে পারে
+      const count = await unitCollection.countDocuments();
+      item.order = count;
+      const result = await unitCollection.insertOne(item);
+      res.send(result);
+    });
+
+    app.delete('/unit/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await unitCollection.deleteOne(query);
+      res.send(result);
+    });
+
+    // ড্র্যাগ অ্যান্ড ড্রপ পজিশন সেভ করার জন্য রুট
+    app.put('/unit/reorder', async (req, res) => {
+      const updatedList = req.body; // ফ্রন্টএন্ড থেকে আসা নতুন সাজানো লিস্ট
+      try {
+        const operations = updatedList.map((item, index) => ({
+          updateOne: {
+            filter: { _id: new ObjectId(item._id) },
+            update: { $set: { order: index } },
+          }
+        }));
+        await unitCollection.bulkWrite(operations);
+        res.send({ success: true, message: "পজিশন আপডেট হয়েছে" });
+      } catch (error) {
+        res.status(500).send({ message: "Reorder failed", error });
+      }
+    });
+
+
+
+    // --- Product Routes (Fixed for Native MongoDB Driver) ---
+
+    // সব প্রোডাক্ট পাওয়া (সর্টেড বাই অর্ডার)
+    app.get('/products', async (req, res) => {
+      try {
+        const data = await productsCollection.find().sort({ order: 1 }).toArray();
+        res.send(data);
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ message: "Error fetching products", error: err.message });
+      }
+    });
+
+    // নতুন প্রোডাক্ট যোগ করা
+    app.post('/products', async (req, res) => {
+      try {
+        const { name, price, unit } = req.body;
+        const count = await productsCollection.countDocuments();
+
+        const newProduct = {
+          name,
+          price: parseFloat(price), // নাম্বার হিসেবে সেভ করা ভালো
+          unit,
+          order: count
+        };
+
+        const result = await productsCollection.insertOne(newProduct);
+        res.status(201).send(result);
+      } catch (err) {
+        res.status(400).send({ message: "Failed to add product", error: err.message });
+      }
+    });
+
+    // প্রোডাক্ট আপডেট করা
+    app.put('/products/:id', async (req, res) => {
+      try {
+        const id = req.params.id;
+        const filter = { _id: new ObjectId(id) };
+        const updatedDoc = {
+          $set: {
+            name: req.body.name,
+            price: parseFloat(req.body.price),
+            unit: req.body.unit
+          }
+        };
+        const result = await productsCollection.updateOne(filter, updatedDoc);
+        res.send(result);
+      } catch (err) {
+        res.status(400).send({ message: "Update failed", error: err.message });
+      }
+    });
+
+    // প্রোডাক্ট ডিলিট করা
+    app.delete('/products/:id', async (req, res) => {
+      try {
+        const id = req.params.id;
+        const query = { _id: new ObjectId(id) };
+        const result = await productsCollection.deleteOne(query);
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Delete failed", error: err.message });
+      }
+    });
+
+    // ড্র্যাগ অ্যান্ড ড্রপ র‍্যাঙ্কিং সেভ করা (Bulk Update)
+    app.put('/products/reorder', async (req, res) => {
+      try {
+        const items = req.body;
+        const operations = items.map((item, index) => ({
+          updateOne: {
+            filter: { _id: new ObjectId(item._id) },
+            update: { $set: { order: index } },
+          }
+        }));
+
+        const result = await productsCollection.bulkWrite(operations);
+        res.send({ success: true, message: "Order Updated Successfully", result });
+      } catch (err) {
+        res.status(500).send({ message: "Reorder failed", error: err.message });
+      }
+    });
+
+
+
+
+    // item related api
+
+    app.get('/item', async (req, res) => {
+      const result = await itemCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.post('/item', async (req, res) => {
+      const item = req.body;
+      const result = await itemCollection.insertOne(item);
+      res.send(result); // এখানে insertedId রিটার্ন করবে
+    });
+
+    app.delete('/item/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) }
+      const result = await itemCollection.deleteOne(query);
+      res.send(result);
+    });
+
+    // কাস্টমার ডাটা আপডেট করার জন্য
+    app.put('/item/:id', async (req, res) => {
+      const id = req.params.id;
+      const customerData = req.body; // সরাসরি বডি থেকে ডাটা নিচ্ছি
+
+      const filter = { _id: new ObjectId(id) };
+      const updateDoc = {
+        $set: {
+          customer: customerData
+        }
+      };
+
+      const result = await itemCollection.updateOne(filter, updateDoc);
+      res.send(result);
+    });
 
 
     await client.db("admin").command({ ping: 1 });
