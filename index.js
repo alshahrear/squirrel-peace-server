@@ -129,8 +129,8 @@ async function run() {
     })
 
 
-  
-    
+
+
     // contact related api
 
     // Only admin can get all contacts
@@ -154,7 +154,7 @@ async function run() {
       res.send(result);
     });
 
-    
+
 
     // Unit related API
 
@@ -281,41 +281,93 @@ async function run() {
     });
 
 
-    // item related api
 
+
+
+
+
+
+
+
+
+
+
+    // ================= ITEM RELATED API =================
+
+    // ১. সকল আইটেম বা ইনভয়েস পাওয়ার জন্য
     app.get('/item', async (req, res) => {
-      const result = await itemCollection.find().toArray();
-      res.send(result);
+      try {
+        const result = await itemCollection.find().toArray();
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Error fetching items" });
+      }
     });
 
+    // ২. নির্দিষ্ট একটি আইডি দিয়ে ডাটা খুঁজে বের করার জন্য (এডিট করার সময় এটি লাগবে)
+    app.get('/item/:id', async (req, res) => {
+      try {
+        const id = req.params.id;
+        const query = { _id: new ObjectId(id) };
+        const result = await itemCollection.findOne(query);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Error fetching specific item" });
+      }
+    });
+
+    // ৩. নতুন ইনভয়েস বা আইটেম সেভ করার জন্য
     app.post('/item', async (req, res) => {
-      const item = req.body;
-      const result = await itemCollection.insertOne(item);
-      res.send(result); // এখানে insertedId রিটার্ন করবে
+      try {
+        const item = req.body;
+        const result = await itemCollection.insertOne(item);
+        res.send(result); // এখানে insertedId রিটার্ন করবে
+      } catch (error) {
+        res.status(500).send({ message: "Error saving item" });
+      }
     });
 
+    // ৪. ইনভয়েস ডিলিট করার জন্য
     app.delete('/item/:id', async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) }
-      const result = await itemCollection.deleteOne(query);
-      res.send(result);
+      try {
+        const id = req.params.id;
+        const query = { _id: new ObjectId(id) };
+        const result = await itemCollection.deleteOne(query);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Error deleting item" });
+      }
     });
 
-    // কাস্টমার ডাটা আপডেট করার জন্য
+    // ৫. ডাটা আপডেট করার জন্য (কাস্টমার এবং আইটেম লিস্ট উভয়ই আপডেট হবে)
     app.put('/item/:id', async (req, res) => {
-      const id = req.params.id;
-      const customerData = req.body; // সরাসরি বডি থেকে ডাটা নিচ্ছি
+      try {
+        const id = req.params.id;
+        const updatedData = req.body;
+        const filter = { _id: new ObjectId(id) };
 
-      const filter = { _id: new ObjectId(id) };
-      const updateDoc = {
-        $set: {
-          customer: customerData
-        }
-      };
+        // এখানে সরাসরি বডি থেকে আসা সব ডাটা আপডেট হবে
+        const updateDoc = {
+          $set: updatedData
+        };
 
-      const result = await itemCollection.updateOne(filter, updateDoc);
-      res.send(result);
+        const result = await itemCollection.updateOne(filter, updateDoc, { upsert: true });
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Error updating data" });
+      }
     });
+
+    // ================= END OF ITEM API =================
+
+
+
+
+
+
+
+
+
 
 
     await client.db("admin").command({ ping: 1 });
