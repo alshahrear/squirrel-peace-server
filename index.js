@@ -198,9 +198,12 @@ async function run() {
 
 
 
-    // --- Product Routes (Fixed for Native MongoDB Driver) ---
 
-    // সব প্রোডাক্ট পাওয়া (সর্টেড বাই অর্ডার)
+    // ==========================================
+    // PRODUCT RELATED API (UPDATED)
+    // ==========================================
+
+    // ১. সব প্রোডাক্ট পাওয়া (সর্টেড বাই অর্ডার)
     app.get('/products', async (req, res) => {
       try {
         const data = await productsCollection.find().sort({ order: 1 }).toArray();
@@ -211,58 +214,8 @@ async function run() {
       }
     });
 
-    // নতুন প্রোডাক্ট যোগ করা
-    app.post('/products', async (req, res) => {
-      try {
-        const { name, price, unit } = req.body;
-        const count = await productsCollection.countDocuments();
-
-        const newProduct = {
-          name,
-          price: parseFloat(price), // নাম্বার হিসেবে সেভ করা ভালো
-          unit,
-          order: count
-        };
-
-        const result = await productsCollection.insertOne(newProduct);
-        res.status(201).send(result);
-      } catch (err) {
-        res.status(400).send({ message: "Failed to add product", error: err.message });
-      }
-    });
-
-    // প্রোডাক্ট আপডেট করা
-    app.put('/products/:id', async (req, res) => {
-      try {
-        const id = req.params.id;
-        const filter = { _id: new ObjectId(id) };
-        const updatedDoc = {
-          $set: {
-            name: req.body.name,
-            price: parseFloat(req.body.price),
-            unit: req.body.unit
-          }
-        };
-        const result = await productsCollection.updateOne(filter, updatedDoc);
-        res.send(result);
-      } catch (err) {
-        res.status(400).send({ message: "Update failed", error: err.message });
-      }
-    });
-
-    // প্রোডাক্ট ডিলিট করা
-    app.delete('/products/:id', async (req, res) => {
-      try {
-        const id = req.params.id;
-        const query = { _id: new ObjectId(id) };
-        const result = await productsCollection.deleteOne(query);
-        res.send(result);
-      } catch (err) {
-        res.status(500).send({ message: "Delete failed", error: err.message });
-      }
-    });
-
-    // ড্র্যাগ অ্যান্ড ড্রপ র‍্যাঙ্কিং সেভ করা (Bulk Update)
+    // ২. ড্র্যাগ অ্যান্ড ড্রপ র‍্যাঙ্কিং সেভ করা (Bulk Update)
+    // আইডি রাউটের উপরে রাখা হয়েছে যাতে 'reorder' শব্দটিকে সার্ভার আইডি মনে না করে
     app.put('/products/reorder', async (req, res) => {
       try {
         const items = req.body;
@@ -280,6 +233,63 @@ async function run() {
       }
     });
 
+    // ৩. নতুন প্রোডাক্ট যোগ করা (৫টি ফিল্ড: shop, name, costPrice, sellingPrice, unit)
+    app.post('/products', async (req, res) => {
+      try {
+        const { name, costPrice, sellingPrice, unit, shop } = req.body;
+        const count = await productsCollection.countDocuments();
+
+        const newProduct = {
+          name,
+          costPrice: parseFloat(costPrice) || 0,
+          sellingPrice: parseFloat(sellingPrice) || 0,
+          unit,
+          shop,
+          order: count
+        };
+
+        const result = await productsCollection.insertOne(newProduct);
+        res.status(201).send(result);
+      } catch (err) {
+        res.status(400).send({ message: "Failed to add product", error: err.message });
+      }
+    });
+
+    // ৪. প্রোডাক্ট আপডেট করা
+    app.put('/products/:id', async (req, res) => {
+      try {
+        const id = req.params.id;
+        const { name, costPrice, sellingPrice, unit, shop } = req.body;
+        const filter = { _id: new ObjectId(id) };
+
+        const updatedDoc = {
+          $set: {
+            name,
+            costPrice: parseFloat(costPrice) || 0,
+            sellingPrice: parseFloat(sellingPrice) || 0,
+            unit,
+            shop
+          }
+        };
+
+        const result = await productsCollection.updateOne(filter, updatedDoc);
+        res.send(result);
+      } catch (err) {
+        res.status(400).send({ message: "Update failed", error: err.message });
+      }
+    });
+
+    // ৫. প্রোডাক্ট ডিলিট করা
+    app.delete('/products/:id', async (req, res) => {
+      try {
+        const id = req.params.id;
+        const query = { _id: new ObjectId(id) };
+        const result = await productsCollection.deleteOne(query);
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Delete failed", error: err.message });
+      }
+    });
 
 
 
@@ -294,40 +304,45 @@ async function run() {
 
     // ================= ITEM RELATED API =================
 
-    // ১. সকল আইটেম বা ইনভয়েস পাওয়ার জন্য
+    // ১. সকল আইটেম বা ইনভয়েস পাওয়ার জন্য
     app.get('/item', async (req, res) => {
       try {
-        const result = await itemCollection.find().toArray();
+        const result = await itemCollection.find().sort({ _id: -1 }).toArray(); // নতুন ইনভয়েস আগে দেখাবে
         res.send(result);
       } catch (error) {
         res.status(500).send({ message: "Error fetching items" });
       }
     });
 
-    // ২. নির্দিষ্ট একটি আইডি দিয়ে ডাটা খুঁজে বের করার জন্য (এডিট করার সময় এটি লাগবে)
+    // ২. নির্দিষ্ট একটি আইডি দিয়ে ডাটা খুঁজে বের করার জন্য (এডিট করার সময় এটি লাগবে)
     app.get('/item/:id', async (req, res) => {
       try {
         const id = req.params.id;
         const query = { _id: new ObjectId(id) };
         const result = await itemCollection.findOne(query);
+        if (!result) {
+          return res.status(404).send({ message: "Item not found" });
+        }
         res.send(result);
       } catch (error) {
         res.status(500).send({ message: "Error fetching specific item" });
       }
     });
 
-    // ৩. নতুন ইনভয়েস বা আইটেম সেভ করার জন্য
+    // ৩. নতুন ইনভয়েস বা আইটেম সেভ করার জন্য
     app.post('/item', async (req, res) => {
       try {
         const item = req.body;
+        // ইনসার্ট করার আগে নিশ্চিত করা হচ্ছে যেন কোনো পুরনো _id না থাকে
+        if (item._id) delete item._id;
         const result = await itemCollection.insertOne(item);
-        res.send(result); // এখানে insertedId রিটার্ন করবে
+        res.send(result);
       } catch (error) {
         res.status(500).send({ message: "Error saving item" });
       }
     });
 
-    // ৪. ইনভয়েস ডিলিট করার জন্য
+    // ৪. ইনভয়েস ডিলিট করার জন্য
     app.delete('/item/:id', async (req, res) => {
       try {
         const id = req.params.id;
@@ -339,27 +354,30 @@ async function run() {
       }
     });
 
-    // ৫. ডাটা আপডেট করার জন্য (কাস্টমার এবং আইটেম লিস্ট উভয়ই আপডেট হবে)
+    // ৫. ডাটা আপডেট করার জন্য (Edit Option নিখুঁতভাবে কাজ করার জন্য)
     app.put('/item/:id', async (req, res) => {
       try {
         const id = req.params.id;
         const updatedData = req.body;
         const filter = { _id: new ObjectId(id) };
 
-        // এখানে সরাসরি বডি থেকে আসা সব ডাটা আপডেট হবে
+        // নিরাপত্তা এবং এরর এড়াতে বডি থেকে _id সরিয়ে নেওয়া হচ্ছে
+        const { _id, ...dataWithoutId } = updatedData;
+
         const updateDoc = {
-          $set: updatedData
+          $set: dataWithoutId
         };
 
+        // upsert: true মানে যদি আইডি না পায় তবে নতুন তৈরি করবে, নয়তো আপডেট করবে
         const result = await itemCollection.updateOne(filter, updateDoc, { upsert: true });
         res.send(result);
       } catch (error) {
+        console.error("Update Error:", error);
         res.status(500).send({ message: "Error updating data" });
       }
     });
 
     // ================= END OF ITEM API =================
-
 
 
 
