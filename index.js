@@ -377,6 +377,39 @@ async function run() {
       }
     });
 
+    // ৬. শপ-ওয়াইজ কস্ট আপডেট করার জন্য
+    app.put('/item/:id/shop-cost', async (req, res) => {
+      try {
+        const id = req.params.id;
+        const { shopName, newCost } = req.body;
+        const filter = { _id: new ObjectId(id) };
+
+        // ইনভয়েসটি খুঁজে বের করা
+        const invoice = await itemCollection.findOne(filter);
+        if (!invoice) return res.status(404).send({ message: "Invoice not found" });
+
+        // ওই শপের আইটেমগুলোর মোট বর্তমান কস্ট বের করা
+        const shopItems = invoice.items.filter(item => (item.shop?.trim() || "Other") === shopName);
+        const currentShopCost = shopItems.reduce((sum, item) => sum + (Number(item.costPrice || 0) * Number(item.quantity || 1)), 0);
+
+        // কস্টের পার্থক্য বের করা (বর্তমান কস্ট - নতুন ইনপুট কস্ট) = অতিরিক্ত প্রফিট
+        const costDifference = currentShopCost - Number(newCost);
+
+        // আইটেমগুলোর কস্ট প্রাইস প্রুপোর্শনালি আপডেট করা (ঐচ্ছিক) অথবা সরাসরি ইনভয়েসের প্রফিটে যোগ করা
+        const updateDoc = {
+          $set: {
+            totalProfit: Number(invoice.totalProfit || 0) + costDifference
+          }
+        };
+
+        const result = await itemCollection.updateOne(filter, updateDoc);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Error updating shop cost" });
+      }
+    });
+
+
     // ================= END OF ITEM API =================
 
 
@@ -444,7 +477,6 @@ app.get("/sitemap.xml", async (req, res) => {
     res.status(500).end();
   }
 });
-
 
 
 app.listen(port, () => {
