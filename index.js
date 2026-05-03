@@ -329,13 +329,13 @@ async function run() {
       }
     });
 
-    // ৩. নতুন ইনভয়েস বা আইটেম সেভ করার জন্য
+    // ৩. নতুন ইনভয়েস সেভ করার জন্য
     app.post('/item', async (req, res) => {
       try {
-        const item = req.body;
-        // ইনসার্ট করার আগে নিশ্চিত করা হচ্ছে যেন কোনো পুরনো _id না থাকে
-        if (item._id) delete item._id;
-        const result = await itemCollection.insertOne(item);
+        const invoiceData = req.body;
+        if (invoiceData._id) delete invoiceData._id; // আইডি থাকলে ডিলিট করে নতুন আইডি তৈরি হতে দেবে
+        
+        const result = await itemCollection.insertOne(invoiceData);
         res.send(result);
       } catch (error) {
         res.status(500).send({ message: "Error saving item" });
@@ -361,18 +361,16 @@ async function run() {
         const updatedData = req.body;
         const filter = { _id: new ObjectId(id) };
 
-        // নিরাপত্তা এবং এরর এড়াতে বডি থেকে _id সরিয়ে নেওয়া হচ্ছে
+        // বডি থেকে _id সরিয়ে নেওয়া হচ্ছে যেন মঙ্গোডিবি আপডেট করতে সমস্যা না করে
         const { _id, ...dataWithoutId } = updatedData;
 
         const updateDoc = {
-          $set: dataWithoutId
+          $set: dataWithoutId // এটি items অ্যারের ভেতরের showQty সহ সব ডাটা আপডেট করে দেবে
         };
 
-        // upsert: true মানে যদি আইডি না পায় তবে নতুন তৈরি করবে, নয়তো আপডেট করবে
         const result = await itemCollection.updateOne(filter, updateDoc, { upsert: true });
         res.send(result);
       } catch (error) {
-        console.error("Update Error:", error);
         res.status(500).send({ message: "Error updating data" });
       }
     });
