@@ -375,6 +375,27 @@ async function run() {
       }
     });
 
+    // ৬. একাধিক ইনভয়েস/আইটেম একসাথে ডিলিট করার জন্য
+    app.delete('/items/delete-multiple', async (req, res) => {
+      try {
+        const { ids } = req.body; // ফ্রন্টএন্ড থেকে আইডি-র অ্যারে আসবে
+
+        if (!ids || !Array.isArray(ids) || ids.length === 0) {
+          return res.status(400).send({ message: "No IDs provided for deletion" });
+        }
+
+        // সাধারণ স্ট্রিং আইডিগুলোকে MongoDB ObjectId-তে রূপান্তর
+        const objectIds = ids.map(id => new ObjectId(id));
+
+        const query = { _id: { $in: objectIds } };
+        const result = await itemCollection.deleteMany(query);
+
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Error deleting multiple items" });
+      }
+    });
+
 
     // ================= END OF ITEM API =================
 
@@ -412,7 +433,7 @@ app.get("/sitemap.xml", async (req, res) => {
     res.header("Content-Type", "application/xml");
     res.header("Content-Encoding", "gzip");
 
-    const smStream = new SitemapStream({ hostname: "https://squirrelpeace.com" });
+    const smStream = new SitemapStream({ hostname: "https://bashaybazar.com" });
     const pipeline = smStream.pipe(createGzip());
 
     // 👉 Static pages
@@ -446,5 +467,5 @@ app.get("/sitemap.xml", async (req, res) => {
 
 
 app.listen(port, () => {
-  console.log(`Squirrel Peace is sitting on port ${port}`);
+  console.log(`Bashay Bazar is sitting on port ${port}`);
 })
