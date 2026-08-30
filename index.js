@@ -1,3 +1,5 @@
+const dns = require('dns');
+dns.setServers(['8.8.8.8', '8.8.4.4']);
 const express = require('express');
 const app = express();
 const cors = require('cors');
@@ -33,8 +35,18 @@ async function run() {
     const usersCollection = client.db("squirrelDb").collection("users");
     const contactCollection = client.db("squirrelDb").collection("contact");
     const productsCollection = client.db("squirrelDb").collection("products");
+    const productCollection = client.db("squirrelDb").collection("product");
     const unitCollection = client.db("squirrelDb").collection("unit");
+    const categoryCollection = client.db("squirrelDb").collection("category");
     const itemCollection = client.db("squirrelDb").collection("item");
+    const trashCollection = client.db("squirrelDb").collection("trash");
+    const shopCollection = client.db("squirrelDb").collection("shop");
+    const companyCollection = client.db("squirrelDb").collection("company");
+    const customerCollection = client.db("squirrelDb").collection("customer");
+    const routeCollection = client.db("squirrelDb").collection("route");
+    const clientCollection = client.db("squirrelDb").collection("client");
+    const userCollection = client.db("squirrelDb").collection("user");
+    const userRoleCollection = client.db("squirrelDb").collection("userRole");
 
 
     // jwt related api
@@ -73,9 +85,33 @@ async function run() {
       next();
     }
 
+
+    // // ক্লায়েন্ট ভেরিফিকেশন মিডলওয়্যার
+    // const verifyClientToken = (req, res, next) => {
+    //   const authHeader = req.headers.authorization;
+    //   if (!authHeader) {
+    //     return res.status(401).send({ message: 'unauthorized access' });
+    //   }
+
+    //   const token = authHeader.split(' ')[1];
+    //   jwt.verify(token, process.env.CLIENT_ACCESS_TOKEN_SECRET || 'client_secret_key_here', (err, decoded) => {
+    //     if (err) {
+    //       return res.status(401).send({ message: 'token expired or invalid' });
+    //     }
+    //     req.client = decoded; // এখানে এখন decoded ইনফোর ভেতরে clientId আছে
+    //     next();
+    //   });
+    // };
+
+
+
+    // ------------------------------------------
+
+
+
     // users related api
 
-    app.get('/users', verifyToken, async (req, res) => {
+    app.get('/users', async (req, res) => {
       const result = await usersCollection.find().toArray();
       res.send(result);
     });
@@ -115,7 +151,6 @@ async function run() {
       res.send(result);
     });
 
-
     app.patch('/users/admin/:id', async (req, res) => {
       const id = req.params.id;
       const filter = { _id: new ObjectId(id) };
@@ -128,6 +163,169 @@ async function run() {
       res.send(result);
     })
 
+    app.patch('/users/remove-admin/:id', async (req, res) => {
+      const id = req.params.id;
+      const filter = { _id: new ObjectId(id) };
+      const updatedDoc = {
+        $set: {
+          role: 'user'
+        }
+      };
+      const result = await usersCollection.updateOne(filter, updatedDoc);
+      res.send(result);
+    });
+
+
+
+
+    // client related api
+
+    app.get('/client', async (req, res) => {
+      const clients = await clientCollection.find().toArray();
+      // পুরনো ডাটাগুলোতে login ফিল্ড না থাকলে ডিফল্টভাবে 'no' সেট করে পাঠানো
+      const result = clients.map(client => ({
+        ...client,
+        login: client.login || 'no'
+      }));
+      res.send(result);
+    });
+
+    // নতুন ক্লায়েন্ট যোগ করার রাউট
+    app.post('/client', async (req, res) => {
+      const newClient = {
+        ...req.body,
+        login: req.body.login || 'no'
+      };
+
+      // ফোন অথবা ইমেইল অলরেডি আছে কিনা চেক করা
+      const existingClient = await clientCollection.findOne({
+        $or: [{ phone: newClient.phone }, { email: newClient.email }]
+      });
+
+      if (existingClient) {
+        let field = existingClient.phone === newClient.phone ? 'phone' : 'email';
+        return res.status(400).json({
+          error: true,
+          field: field,
+          message: `This ${field} is already registered!`
+        });
+      }
+
+      const result = await clientCollection.insertOne(newClient);
+      res.send(result);
+    });
+
+    // ক্লায়েন্ট আপডেট করার রাউট
+    app.put('/client/:id', async (req, res) => {
+      const id = req.params.id;
+      const updatedClient = req.body;
+
+      // অন্য কোনো ইউজারের সাথে ফোন বা ইমেইল মিলে যায় কি না চেক করা
+      const existingClient = await clientCollection.findOne({
+        _id: { $ne: new ObjectId(id) },
+        $or: [{ phone: updatedClient.phone }, { email: updatedClient.email }]
+      });
+
+      if (existingClient) {
+        let field = existingClient.phone === updatedClient.phone ? 'phone' : 'email';
+        return res.status(400).json({
+          error: true,
+          field: field,
+          message: `This ${field} is already used by another client!`
+        });
+      }
+
+      const filter = { _id: new ObjectId(id) };
+      const updateDoc = {
+        $set: {
+          name: updatedClient.name,
+          phone: updatedClient.phone,
+          email: updatedClient.email,
+          password: updatedClient.password,
+          address: updatedClient.address,
+          isActive: updatedClient.isActive,
+          login: updatedClient.login || 'no'
+        }
+      };
+      const result = await clientCollection.updateOne(filter, updateDoc);
+      res.send(result);
+    });
+
+    // ৪. ক্লায়েন্ট ডিলিট করার জন্য
+    app.delete('/client/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await clientCollection.deleteOne(query);
+      res.send(result);
+    });
+
+    // ক্লায়েন্টের লগইন স্ট্যাটাস আপডেট বা ফোর্সড লগআউট করার জন্য PATCH রুট
+    app.patch('/client/login-status/:id', async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { login } = req.body; // 'yes' বা 'no'
+
+        const result = await clientCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { login: login } }
+        );
+
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Failed to update login status" });
+      }
+    });
+
+    // ==========================================
+    // নতুন যোগ করা: ক্লায়েন্ট লগইন এপিআই
+    // ==========================================
+    app.post('/client/login', async (req, res) => {
+      try {
+        const { email, password } = req.body;
+
+        // ১. ইমেইল দিয়ে ক্লায়েন্ট খোঁজা
+        const client = await clientCollection.findOne({ email });
+        if (!client) {
+          return res.status(400).json({ message: 'Email not found!' });
+        }
+
+        // ২. অ্যাকাউন্ট একটিভ আছে কিনা চেক করা
+        if (client.isActive === false || client.isActive === 'false') {
+          return res.status(400).json({ message: 'Your account is inactive!' });
+        }
+
+        // ৩. পাসওয়ার্ড মিলছে কিনা চেক করা
+        if (client.password !== password) {
+          return res.status(400).json({ message: 'Wrong password!' });
+        }
+
+        // ৪. JWT টোকেন তৈরি করা
+        const tokenPayload = { clientId: client._id, email: client.email };
+        const token = jwt.sign(
+          tokenPayload,
+          process.env.CLIENT_ACCESS_TOKEN_SECRET || 'client_secret_key_here',
+          { expiresIn: '7d' }
+        );
+
+        // ৫. সফলভাবে রেসপন্স পাঠানো
+        res.send({
+          success: true,
+          token,
+          client: {
+            _id: client._id,
+            name: client.name,
+            email: client.email,
+            phone: client.phone,
+            address: client.address,
+            isActive: client.isActive
+          }
+        });
+
+      } catch (error) {
+        console.error('Login error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+      }
+    });
 
 
 
@@ -156,31 +354,562 @@ async function run() {
 
 
 
-    // Unit related API
+    // --- User Routes (Node.js & Express) ---
 
-    app.get('/unit', async (req, res) => {
-      const result = await unitCollection.find().sort({ order: 1 }).toArray(); // Order অনুযায়ী সর্ট হবে
+    // Get all users
+    app.get('/user', async (req, res) => {
+      try {
+        const result = await userCollection.find().toArray();
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: 'Failed to fetch users' });
+      }
+    });
+
+    // Add new user (POST)
+    app.post('/user', async (req, res) => {
+      try {
+        const user = req.body;
+        // আপনি চাইলে এখানে পাসওয়ার্ড হাশ করে নিতে পারেন
+        const result = await userCollection.insertOne(user);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: 'Failed to create user' });
+      }
+    });
+
+    // Update user (PUT) - Handles empty password gracefully
+    app.put('/user/:id', async (req, res) => {
+      try {
+        const id = req.params.id;
+        const updatedData = req.body;
+
+        // যদি পাসওয়ার্ড ফিল্ড ফাঁকা থাকে, তবে ডাটাবেজে থাকা পুরোনো পাসওয়ার্ডটিই রেখে দেবো
+        if (!updatedData.password || updatedData.password.trim() === '') {
+          const existingUser = await userCollection.findOne({ _id: new ObjectId(id) });
+          if (existingUser) {
+            updatedData.password = existingUser.password;
+          }
+        }
+
+        const filter = { _id: new ObjectId(id) };
+        const updateDoc = {
+          $set: {
+            name: updatedData.name,
+            email: updatedData.email,
+            phone: updatedData.phone,
+            role: updatedData.role,
+            address: updatedData.address,
+            isActive: updatedData.isActive,
+            password: updatedData.password // আগের অথবা নতুন পাসওয়ার্ড
+          }
+        };
+
+        const result = await userCollection.updateOne(filter, updateDoc);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: 'Failed to update user' });
+      }
+    });
+
+    // Delete user
+    app.delete('/user/:id', async (req, res) => {
+      try {
+        const id = req.params.id;
+        const query = { _id: new ObjectId(id) };
+        const result = await userCollection.deleteOne(query);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: 'Failed to delete user' });
+      }
+    });
+
+
+
+
+    // userRole related api
+
+
+    // ১. সকল ইউজার রোল ফেচ করা (GET)
+    app.get('/userRole', async (req, res) => {
+      const result = await userRoleCollection.find().toArray();
       res.send(result);
     });
 
-    app.post('/unit', async (req, res) => {
+    // ২. নতুন ইউজার রোল যোগ করা (POST)
+    app.post('/userRole', async (req, res) => {
       const item = req.body;
-      // নতুন আইটেমকে শেষে রাখার জন্য কাউন্ট চেক করা যেতে পারে
-      const count = await unitCollection.countDocuments();
-      item.order = count;
-      const result = await unitCollection.insertOne(item);
+      const result = await userRoleCollection.insertOne(item);
       res.send(result);
     });
 
-    app.delete('/unit/:id', async (req, res) => {
+    // ৩. ইউজার রোল আপডেট করা (PUT) - এডিট ফিচারের জন্য এটি লাগবে
+    app.put('/userRole/:id', async (req, res) => {
+      const id = req.params.id;
+      const updatedItem = req.body;
+      const filter = { _id: new ObjectId(id) };
+      const updateDoc = {
+        $set: {
+          role: updatedItem.role,
+        },
+      };
+      const result = await userRoleCollection.updateOne(filter, updateDoc);
+      res.send(result);
+    });
+
+    // ৪. ইউজার রোল ডিলিট করা (DELETE)
+    app.delete('/userRole/:id', async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
-      const result = await unitCollection.deleteOne(query);
+      const result = await userRoleCollection.deleteOne(query);
+      res.send(result);
+    });
+
+
+
+
+
+
+    // Company related APIs
+
+    // Get all companies
+    app.get('/company', async (req, res) => {
+      const result = await companyCollection.find().toArray();
+      res.send(result);
+    });
+
+    // Post a new company
+    app.post('/company', async (req, res) => {
+      const item = req.body;
+      const result = await companyCollection.insertOne(item);
+      res.send(result);
+    });
+
+    // Update a company (PUT)
+    app.put('/company/:id', async (req, res) => {
+      const id = req.params.id;
+      const updatedItem = req.body;
+      const filter = { _id: new ObjectId(id) };
+      const updateDoc = {
+        $set: {
+          businessName: updatedItem.businessName,
+          contactNumber: updatedItem.contactNumber,
+          email: updatedItem.email,
+          contactName: updatedItem.contactName,
+          businessNumber: updatedItem.businessNumber,
+          openingBalance: updatedItem.openingBalance,
+          address: updatedItem.address,
+          note: updatedItem.note
+        },
+      };
+      const result = await companyCollection.updateOne(filter, updateDoc);
+      res.send(result);
+    });
+
+    // Delete a company
+    app.delete('/company/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await companyCollection.deleteOne(query);
+      res.send(result);
+    });
+
+
+
+
+    // Product Related APIs
+
+    // Get all products
+    app.get('/product', async (req, res) => {
+      const result = await productCollection.find().toArray();
+      res.send(result);
+    });
+
+    // Add a product
+    app.post('/product', async (req, res) => {
+      const item = req.body;
+      const result = await productCollection.insertOne(item);
+      res.send(result);
+    });
+
+    // Delete a product
+    app.delete('/product/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await productCollection.deleteOne(query);
+      res.send(result);
+    });
+
+
+    // Update/Edit a product
+    app.put('/product/:id', async (req, res) => {
+      const id = req.params.id;
+      const updatedProduct = req.body;
+
+      // যদি _id রিকোয়েস্ট বডিতে চলে আসে, তবে সেটি বাদ দেওয়া ভালো যাতে MongoDB তে _id আপডেট করার সময় Immutable ফিল্ডের এরর না আসে
+      delete updatedProduct._id;
+
+      const filter = { _id: new ObjectId(id) };
+      const updateDoc = {
+        $set: {
+          productName: updatedProduct.productName,
+          company: updatedProduct.company,
+          sku: updatedProduct.sku,
+          category: updatedProduct.category,
+          alertQuantity: updatedProduct.alertQuantity,
+          purchasePrice: updatedProduct.purchasePrice,
+          sellingPrice: updatedProduct.sellingPrice,
+          mrp: updatedProduct.mrp,
+          unit: updatedProduct.unit,
+          pcsOfUnit: updatedProduct.pcsOfUnit,
+          freeProductQty: updatedProduct.freeProductQty,
+          freeProductName: updatedProduct.freeProductName,
+          openingStockQty: updatedProduct.openingStockQty,
+          note: updatedProduct.note,
+          isActive: updatedProduct.isActive
+        },
+      };
+
+      try {
+        const result = await productCollection.updateOne(filter, updateDoc);
+        res.send(result);
+      } catch (error) {
+        console.error('Error updating product:', error);
+        res.status(500).send({ error: 'Failed to update product' });
+      }
+    });
+
+
+
+
+
+
+
+
+    // Customer related APIs
+
+    // Get all customers
+    app.get('/customer', async (req, res) => {
+      const result = await customerCollection.find().toArray();
+      res.send(result);
+    });
+
+    // Post a new customer
+    app.post('/customer', async (req, res) => {
+      const item = req.body;
+      const result = await customerCollection.insertOne(item);
+      res.send(result);
+    });
+
+    // Update a customer (PUT)
+    app.put('/customer/:id', async (req, res) => {
+      const id = req.params.id;
+      const updatedItem = req.body;
+      const filter = { _id: new ObjectId(id) };
+      const updateDoc = {
+        $set: {
+          customerType: updatedItem.customerType,
+          businessName: updatedItem.businessName,
+          contactNumber: updatedItem.contactNumber,
+          email: updatedItem.email,
+          contactName: updatedItem.contactName,
+          businessNumber: updatedItem.businessNumber,
+          openingBalance: updatedItem.openingBalance,
+          creditLimit: updatedItem.creditLimit,
+          address: updatedItem.address,
+          route: updatedItem.customerType === 'Wholesale Customer' ? updatedItem.route : '',
+          note: updatedItem.note
+        },
+      };
+      const result = await customerCollection.updateOne(filter, updateDoc);
+      res.send(result);
+    });
+
+    // Delete a customer
+    app.delete('/customer/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await customerCollection.deleteOne(query);
+      res.send(result);
+    });
+
+
+    // Unit related API 
+
+    // ১. সব ইউনিট একসাথে রিভার্স অর্ডারে পাওয়ার জন্য (পেজিনেশন ছাড়া)
+    app.get('/unit', async (req, res) => {
+      try {
+        const result = await unitCollection.find()
+          .sort({ order: -1 }) // নতুনগুলো আগে দেখাবে
+          .toArray();
+
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Error fetching units", error });
+      }
+    });
+
+    // ২. নতুন ইউনিট যোগ করার সময় (সর্বোচ্চ অর্ডার হিসাব করে যুক্ত করা)
+    app.post('/unit', async (req, res) => {
+      try {
+        const item = req.body;
+
+        // সবচেয়ে বড় order ভ্যালু বের করে তার সাথে ১ যোগ করা, যাতে নতুনটি সবার উপরে থাকে
+        const lastUnit = await unitCollection.findOne({}, { sort: { order: -1 } });
+        const nextOrder = lastUnit ? (lastUnit.order + 1) : 1;
+
+        const newUnit = {
+          name: item.name,
+          isActive: item.isActive !== undefined ? item.isActive : true,
+          order: nextOrder,
+          createdAt: new Date().toLocaleString("en-GB", {
+            day: "2-digit",
+            month: "2-digit",
+            year: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+            hour12: true
+          }).replace(',', '')
+        };
+
+        const result = await unitCollection.insertOne(newUnit);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Error adding unit", error });
+      }
+    });
+
+    // ৩. নির্দিষ্ট ইউনিট আপডেট করার জন্য
+    app.put('/unit/:id', async (req, res) => {
+      try {
+        const id = req.params.id;
+        const { name, isActive } = req.body;
+        const query = { _id: new ObjectId(id) };
+
+        const updateDoc = {
+          $set: {
+            name: name,
+            isActive: isActive
+          }
+        };
+
+        const result = await unitCollection.updateOne(query, updateDoc);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Error updating unit", error });
+      }
+    });
+
+    // ৪. নির্দিষ্ট ইউনিট ডিলিট করার জন্য
+    app.delete('/unit/:id', async (req, res) => {
+      try {
+        const id = req.params.id;
+        const query = { _id: new ObjectId(id) };
+        const result = await unitCollection.deleteOne(query);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Error deleting unit", error });
+      }
+    });
+
+
+
+
+
+    // Route related API 
+
+    // ১. সব রাউট একসাথে রিভার্স অর্ডারে পাওয়ার জন্য (পেজিনেশন ছাড়া)
+    app.get('/route', async (req, res) => {
+      try {
+        const result = await routeCollection.find()
+          .sort({ order: -1 }) // নতুনগুলো আগে দেখাবে
+          .toArray();
+
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Error fetching routes", error });
+      }
+    });
+
+    // ২. নতুন রাউট যোগ করার সময় (কোড সহ)
+    app.post('/route', async (req, res) => {
+      try {
+        const item = req.body;
+
+        // সবচেয়ে বড় order ভ্যালু বের করে তার সাথে ১ যোগ করা
+        const lastroute = await routeCollection.findOne({}, { sort: { order: -1 } });
+        const nextOrder = lastroute ? (lastroute.order + 1) : 1;
+
+        const newroute = {
+          name: item.name,
+          code: item.code || "", // নতুন code ফিল্ড যুক্ত হলো
+          isActive: item.isActive !== undefined ? item.isActive : true,
+          order: nextOrder,
+          createdAt: new Date().toLocaleString("en-GB", {
+            day: "2-digit",
+            month: "2-digit",
+            year: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+            hour12: true
+          }).replace(',', '')
+        };
+
+        const result = await routeCollection.insertOne(newroute);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Error adding route", error });
+      }
+    });
+
+    // ৩. নির্দিষ্ট রাউট আপডেট করার জন্য (কোড সহ)
+    app.put('/route/:id', async (req, res) => {
+      try {
+        const id = req.params.id;
+        const { name, code, isActive } = req.body; // code রিসিভ করা হলো
+        const query = { _id: new ObjectId(id) };
+
+        const updateDoc = {
+          $set: {
+            name: name,
+            code: code, // code আপডেট করা হলো
+            isActive: isActive
+          }
+        };
+
+        const result = await routeCollection.updateOne(query, updateDoc);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Error updating route", error });
+      }
+    });
+
+    // ৪. নির্দিষ্ট রাউট ডিলিট করার জন্য
+    app.delete('/route/:id', async (req, res) => {
+      try {
+        const id = req.params.id;
+        const query = { _id: new ObjectId(id) };
+        const result = await routeCollection.deleteOne(query);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Error deleting route", error });
+      }
+    });
+
+
+
+
+    // Category related API 
+
+    // ১. সব ক্যাটাগরি একসাথে রিভার্স অর্ডারে পাওয়ার জন্য (পেজিনেশন ছাড়া)
+    app.get('/category', async (req, res) => {
+      try {
+        const result = await categoryCollection.find()
+          .sort({ order: -1 }) // নতুনগুলো আগে দেখাবে
+          .toArray();
+
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Error fetching categories", error });
+      }
+    });
+
+    // ২. নতুন ক্যাটাগরি যোগ করার সময় (সর্বোচ্চ অর্ডার হিসাব করে যুক্ত করা)
+    app.post('/category', async (req, res) => {
+      try {
+        const item = req.body;
+
+        // সবচেয়ে বড় order ভ্যালু বের করে তার সাথে ১ যোগ করা, যাতে নতুনটি সবার উপরে থাকে
+        const lastCategory = await categoryCollection.findOne({}, { sort: { order: -1 } });
+        const nextOrder = lastCategory ? (lastCategory.order + 1) : 1;
+
+        const options = { timeZone: 'Asia/Dhaka', hour12: true };
+        const now = new Date();
+        const formattedDate = now.toLocaleDateString('en-GB', options) + ' ' + now.toLocaleTimeString('en-US', options).toLowerCase();
+
+        const newCategory = {
+          name: item.name,
+          isActive: item.isActive !== undefined ? item.isActive : true,
+          order: nextOrder,
+          createdAt: formattedDate
+        };
+
+        const result = await categoryCollection.insertOne(newCategory);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Error adding category", error });
+      }
+    });
+
+    // ৩. নির্দিষ্ট ক্যাটাগরি আপডেট করার জন্য
+    app.put('/category/:id', async (req, res) => {
+      try {
+        const id = req.params.id;
+        const { name, isActive } = req.body;
+        const query = { _id: new ObjectId(id) };
+
+        const updateDoc = {
+          $set: {
+            name: name,
+            isActive: isActive
+          }
+        };
+
+        const result = await categoryCollection.updateOne(query, updateDoc);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Error updating category", error });
+      }
+    });
+
+    // ৪. নির্দিষ্ট ক্যাটাগরি ডিলিট করার জন্য
+    app.delete('/category/:id', async (req, res) => {
+      try {
+        const id = req.params.id;
+        const query = { _id: new ObjectId(id) };
+        const result = await categoryCollection.deleteOne(query);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Error deleting category", error });
+      }
+    });
+
+
+
+
+
+
+
+
+
+    // shop related api
+
+
+    app.get('/shop', async (req, res) => {
+      const result = await shopCollection.find().sort({ order: 1 }).toArray(); // Order অনুযায়ী সর্ট হবে
+      res.send(result);
+    });
+
+    app.post('/shop', async (req, res) => {
+      const item = req.body;
+      // নতুন আইটেমকে শেষে রাখার জন্য কাউন্ট চেক করা যেতে পারে
+      const count = await shopCollection.countDocuments();
+      item.order = count;
+      const result = await shopCollection.insertOne(item);
+      res.send(result);
+    });
+
+    app.delete('/shop/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await shopCollection.deleteOne(query);
       res.send(result);
     });
 
     // ড্র্যাগ অ্যান্ড ড্রপ পজিশন সেভ করার জন্য রুট
-    app.put('/unit/reorder', async (req, res) => {
+    app.put('/shop/reorder', async (req, res) => {
       const updatedList = req.body; // ফ্রন্টএন্ড থেকে আসা নতুন সাজানো লিস্ট
       try {
         const operations = updatedList.map((item, index) => ({
@@ -189,7 +918,7 @@ async function run() {
             update: { $set: { order: index } },
           }
         }));
-        await unitCollection.bulkWrite(operations);
+        await shopCollection.bulkWrite(operations);
         res.send({ success: true, message: "পজিশন আপডেট হয়েছে" });
       } catch (error) {
         res.status(500).send({ message: "Reorder failed", error });
@@ -198,10 +927,8 @@ async function run() {
 
 
 
+    // PRODUCT RELATED API 
 
-    // ==========================================
-    // PRODUCT RELATED API (UPDATED)
-    // ==========================================
 
     // ১. সব প্রোডাক্ট পাওয়া (সর্টেড বাই অর্ডার)
     app.get('/products', async (req, res) => {
@@ -294,17 +1021,10 @@ async function run() {
 
 
 
-
-
-
-
-
-
-
-
-    // ================= ITEM RELATED API =================
+    //  ITEM RELATED API 
 
     // ১. সকল আইটেম বা ইনভয়েস পাওয়ার জন্য
+
     app.get('/item', async (req, res) => {
       try {
         const result = await itemCollection.find().sort({ _id: -1 }).toArray(); // নতুন ইনভয়েস আগে দেখাবে
@@ -334,7 +1054,7 @@ async function run() {
       try {
         const invoiceData = req.body;
         if (invoiceData._id) delete invoiceData._id; // আইডি থাকলে ডিলিট করে নতুন আইডি তৈরি হতে দেবে
-        
+
         const result = await itemCollection.insertOne(invoiceData);
         res.send(result);
       } catch (error) {
@@ -342,11 +1062,21 @@ async function run() {
       }
     });
 
-    // ৪. ইনভয়েস ডিলিট করার জন্য
+    // ৪. ইনভয়েস ডিলিট করার জন্য (Trash-এ সেভ হয়ে তারপর ডিলিট হবে)
     app.delete('/item/:id', async (req, res) => {
       try {
         const id = req.params.id;
         const query = { _id: new ObjectId(id) };
+
+        // ডিলিট করার আগে ডাটা খুঁজে বের করা
+        const itemToDelete = await itemCollection.findOne(query);
+
+        if (itemToDelete) {
+          // Trash কালেকশনে ডাটা সেভ করা
+          await trashCollection.insertOne(itemToDelete);
+        }
+
+        // মূল কালেকশন থেকে ডিলিট করা
         const result = await itemCollection.deleteOne(query);
         res.send(result);
       } catch (error) {
@@ -375,19 +1105,27 @@ async function run() {
       }
     });
 
-    // ৬. একাধিক ইনভয়েস/আইটেম একসাথে ডিলিট করার জন্য
+    // ৬. একাধিক ইনভয়েস/আইটেম একসাথে ডিলিট করার জন্য (Trash-এ সেভ হয়ে তারপর ডিলিট হবে)
     app.delete('/items/delete-multiple', async (req, res) => {
       try {
-        const { ids } = req.body; // ফ্রন্টএন্ড থেকে আইডি-র অ্যারে আসবে
+        const { ids } = req.body;
 
         if (!ids || !Array.isArray(ids) || ids.length === 0) {
           return res.status(400).send({ message: "No IDs provided for deletion" });
         }
 
-        // সাধারণ স্ট্রিং আইডিগুলোকে MongoDB ObjectId-তে রূপান্তর
         const objectIds = ids.map(id => new ObjectId(id));
-
         const query = { _id: { $in: objectIds } };
+
+        // ডিলিট হতে যাওয়া সব ডাটা আগে বের করা
+        const itemsToDelete = await itemCollection.find(query).toArray();
+
+        if (itemsToDelete.length > 0) {
+          // Trash কালেকশনে সব ডাটা সেভ করা
+          await trashCollection.insertMany(itemsToDelete);
+        }
+
+        // মূল কালেকশন থেকে ডিলিট করা
         const result = await itemCollection.deleteMany(query);
 
         res.send(result);
@@ -396,15 +1134,88 @@ async function run() {
       }
     });
 
+    // ৭. ট্র্যাশ থেকে সকল ডিলিট হওয়া ডাটা পাওয়ার জন্য
+    app.get('/trash', async (req, res) => {
+      try {
+        const result = await trashCollection.find().sort({ _id: -1 }).toArray();
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Error fetching trash items" });
+      }
+    });
 
-    // ================= END OF ITEM API =================
+    // ৮. ট্র্যাশ থেকে একটি আইটেম রিকভার (পুনরুদ্ধার) করার জন্য
+    app.post('/trash/restore/:id', async (req, res) => {
+      try {
+        const id = req.params.id;
+        const query = { _id: new ObjectId(id) };
+        const itemToRestore = await trashCollection.findOne(query);
 
+        if (!itemToRestore) {
+          return res.status(404).send({ message: "Item not found in trash" });
+        }
 
+        await itemCollection.insertOne(itemToRestore);
+        const result = await trashCollection.deleteOne(query);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Error restoring item" });
+      }
+    });
 
+    // ৯. ট্র্যাশ থেকে একাধিক আইটেম একসাথে রিকভার করার জন্য
+    app.post('/trash/restore-multiple', async (req, res) => {
+      try {
+        const { ids } = req.body;
+        if (!ids || !Array.isArray(ids) || ids.length === 0) {
+          return res.status(400).send({ message: "No IDs provided" });
+        }
 
+        const objectIds = ids.map(id => new ObjectId(id));
+        const query = { _id: { $in: objectIds } };
+        const itemsToRestore = await trashCollection.find(query).toArray();
 
+        if (itemsToRestore.length > 0) {
+          await itemCollection.insertMany(itemsToRestore);
+          const result = await trashCollection.deleteMany(query);
+          res.send(result);
+        } else {
+          res.status(404).send({ message: "No items found to restore" });
+        }
+      } catch (error) {
+        res.status(500).send({ message: "Error restoring multiple items" });
+      }
+    });
 
+    // ১১. ট্র্যাশ থেকে একাধিক আইটেম একসাথে পার্মানেন্টলি ডিলিট (ডায়নামিক রুটের উপরে রাখতে হবে)
+    app.delete('/trash/delete-multiple', async (req, res) => {
+      try {
+        const { ids } = req.body;
+        if (!ids || !Array.isArray(ids) || ids.length === 0) {
+          return res.status(400).send({ message: "No IDs provided" });
+        }
 
+        const objectIds = ids.map(id => new ObjectId(id));
+        const query = { _id: { $in: objectIds } };
+        const result = await trashCollection.deleteMany(query);
+        res.send(result);
+      } catch (error) {
+        console.error("Bulk delete error:", error);
+        res.status(500).send({ message: "Error deleting multiple items" });
+      }
+    });
+
+    // ১০. ট্র্যাশ থেকে একটি আইটেম পার্মানেন্টলি ডিলিট করার জন্য
+    app.delete('/trash/:id', async (req, res) => {
+      try {
+        const id = req.params.id;
+        const query = { _id: new ObjectId(id) };
+        const result = await trashCollection.deleteOne(query);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Error permanently deleting item" });
+      }
+    });
 
 
 
