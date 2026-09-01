@@ -47,6 +47,13 @@ async function run() {
     const clientCollection = client.db("squirrelDb").collection("client");
     const userCollection = client.db("squirrelDb").collection("user");
     const userRoleCollection = client.db("squirrelDb").collection("userRole");
+    const investmentCollection = client.db("squirrelDb").collection("investment");
+    const adjustmentCollection = client.db("squirrelDb").collection("adjustment");
+    const headsCollection = client.db("squirrelDb").collection("heads");
+    const incomeCollection = client.db("squirrelDb").collection("income");
+    const expenseCollection = client.db("squirrelDb").collection("expense");
+    const routeExpenseCollection = client.db("squirrelDb").collection("routeExpense");
+    const transferCollection = client.db("squirrelDb").collection("transfer");
 
 
     // jwt related api
@@ -331,26 +338,351 @@ async function run() {
 
     // contact related api
 
-    // Only admin can get all contacts
+
     app.get('/contact', async (req, res) => {
       const result = await contactCollection.find().toArray();
       res.send(result);
     });
 
-    // Only admin can post a new contact
     app.post('/contact', async (req, res) => {
       const item = req.body;
       const result = await contactCollection.insertOne(item);
       res.send(result);
     });
 
-    // Only admin can delete a contact
     app.delete('/contact/:id', async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
       const result = await contactCollection.deleteOne(query);
       res.send(result);
     });
+
+
+
+    // transfer related api
+
+
+    app.get('/transfer', async (req, res) => {
+      const result = await transferCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.post('/transfer', async (req, res) => {
+      const item = req.body;
+      const result = await transferCollection.insertOne(item);
+      res.send(result);
+    });
+
+    app.delete('/transfer/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await transferCollection.deleteOne(query);
+      res.send(result);
+    });
+
+
+
+
+    // route expense related api
+
+
+    app.get('/routeExpense', async (req, res) => {
+      const result = await routeExpenseCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.post('/routeExpense', async (req, res) => {
+      const item = req.body;
+      const result = await routeExpenseCollection.insertOne(item);
+      res.send(result);
+    });
+
+    app.delete('/routeExpense/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await routeExpenseCollection.deleteOne(query);
+      res.send(result);
+    });
+
+    app.put('/routeExpense/:id', async (req, res) => {
+      try {
+        const { id } = req.params;
+        const updatedData = req.body;
+
+        const result = await routeExpenseCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updatedData }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ error: 'Route Expense record not found' });
+        }
+
+        res.status(200).json({ message: 'Route Expense updated successfully' });
+      } catch (error) {
+        console.error('Error updating route expense:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+      }
+    });
+
+
+
+
+    // account heads related api
+
+    app.get('/account-heads', async (req, res) => {
+      const result = await headsCollection.find().sort({ _id: -1 }).toArray();
+      res.send(result);
+    });
+
+    app.post('/account-heads', async (req, res) => {
+      const item = req.body;
+      const result = await headsCollection.insertOne(item);
+      res.send(result);
+    });
+
+    app.put('/account-heads/:id', async (req, res) => {
+      const id = req.params.id;
+      const updatedData = req.body;
+      const query = { _id: new ObjectId(id) };
+      const updateDoc = {
+        $set: {
+          category: updatedData.category,
+          name: updatedData.name,
+          isActive: updatedData.isActive,
+        },
+      };
+      const result = await headsCollection.updateOne(query, updateDoc);
+      res.send(result);
+    });
+
+    app.delete('/account-heads/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await headsCollection.deleteOne(query);
+      res.send(result);
+    });
+
+
+
+    // income related api
+
+
+    app.get('/income', async (req, res) => {
+      const result = await incomeCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.post('/income', async (req, res) => {
+      const item = req.body;
+      const result = await incomeCollection.insertOne(item);
+      res.send(result);
+    });
+
+    app.delete('/income/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await incomeCollection.deleteOne(query);
+      res.send(result);
+    });
+
+    app.put('/income/:id', async (req, res) => {
+      try {
+        const { id } = req.params;
+        const updatedData = req.body;
+
+        const result = await incomeCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updatedData }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ error: 'Income record not found' });
+        }
+
+        res.status(200).json({ message: 'Income updated successfully' });
+      } catch (error) {
+        console.error('Error updating income:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+      }
+    })
+
+
+
+    // expense related api
+
+
+    app.get('/expense', async (req, res) => {
+      const result = await expenseCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.post('/expense', async (req, res) => {
+      const item = req.body;
+      const result = await expenseCollection.insertOne(item);
+      res.send(result);
+    });
+
+    app.delete('/expense/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await expenseCollection.deleteOne(query);
+      res.send(result);
+    });
+
+    app.put('/expense/:id', async (req, res) => {
+      try {
+        const { id } = req.params;
+        const updatedData = req.body;
+
+        const result = await expenseCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updatedData }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ error: 'Expense record not found' });
+        }
+
+        res.status(200).json({ message: 'Expense updated successfully' });
+      } catch (error) {
+        console.error('Error updating expense:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+      }
+    });
+
+
+
+
+
+
+    // Investment related APIs
+
+
+    app.get('/investment', async (req, res) => {
+      try {
+        const result = await investmentCollection.find().toArray();
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: 'Failed to fetch investments' });
+      }
+    });
+
+
+    app.post('/investment', async (req, res) => {
+      try {
+        const item = req.body;
+        const result = await investmentCollection.insertOne(item);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: 'Failed to add investment' });
+      }
+    });
+
+
+    app.put('/investment/:id', async (req, res) => {
+      try {
+        const id = req.params.id;
+        const updatedData = req.body;
+        const filter = { _id: new ObjectId(id) };
+        const updateDoc = {
+          $set: {
+            date: updatedData.date,
+            accountType: updatedData.accountType,
+            bankName: updatedData.bankName || '',
+            accountNumber: updatedData.accountNumber || '',
+            accountBranch: updatedData.accountBranch || '',
+            accountName: updatedData.accountName || '',
+            amount: Number(updatedData.amount),
+            note: updatedData.note || ''
+          }
+        };
+        const result = await investmentCollection.updateOne(filter, updateDoc);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: 'Failed to update investment' });
+      }
+    });
+
+
+    app.delete('/investment/:id', async (req, res) => {
+      try {
+        const id = req.params.id;
+        const query = { _id: new ObjectId(id) };
+        const result = await investmentCollection.deleteOne(query);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: 'Failed to delete investment' });
+      }
+    });
+
+
+
+    // adjustment related api
+
+    app.get('/adjustment', async (req, res) => {
+      try {
+        const result = await adjustmentCollection.find().toArray();
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: 'Failed to fetch adjustments' });
+      }
+    });
+
+    // নির্দিষ্ট investment-এর adjustment history আনার জন্য (investmentId দিয়ে filter)
+    app.get('/adjustment/:investmentId', async (req, res) => {
+      try {
+        const investmentId = req.params.investmentId;
+        const result = await adjustmentCollection
+          .find({ investmentId: investmentId })
+          .toArray();
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: 'Failed to fetch adjustment history' });
+      }
+    });
+
+    app.post('/adjustment', async (req, res) => {
+      try {
+        const item = req.body;
+        const result = await adjustmentCollection.insertOne(item);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: 'Failed to add adjustment' });
+      }
+    });
+
+    app.put('/adjustment/:id', async (req, res) => {
+      try {
+        const id = req.params.id;
+        const updatedData = req.body;
+        const filter = { _id: new ObjectId(id) };
+        const updateDoc = {
+          $set: {
+            date: updatedData.date,
+            mode: updatedData.mode,
+            amount: Number(updatedData.amount),
+            note: updatedData.note || ''
+          }
+        };
+        const result = await adjustmentCollection.updateOne(filter, updateDoc);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: 'Failed to update adjustment' });
+      }
+    });
+
+    app.delete('/adjustment/:id', async (req, res) => {
+      try {
+        const id = req.params.id;
+        const query = { _id: new ObjectId(id) };
+        const result = await adjustmentCollection.deleteOne(query);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: 'Failed to delete adjustment' });
+      }
+    });
+
 
 
 
