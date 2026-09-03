@@ -361,7 +361,6 @@ async function run() {
 
     // transfer related api
 
-
     app.get('/transfer', async (req, res) => {
       const result = await transferCollection.find().toArray();
       res.send(result);
@@ -370,6 +369,25 @@ async function run() {
     app.post('/transfer', async (req, res) => {
       const item = req.body;
       const result = await transferCollection.insertOne(item);
+      res.send(result);
+    });
+
+    app.put('/transfer/:id', async (req, res) => {
+      const id = req.params.id;
+      const updatedItem = req.body;
+      const filter = { _id: new ObjectId(id) };
+      const updateDoc = {
+        $set: {
+          transferFrom: updatedItem.transferFrom,
+          transferTo: updatedItem.transferTo,
+          date: updatedItem.date,
+          fromAccount: updatedItem.fromAccount,
+          toAccount: updatedItem.toAccount,
+          amount: updatedItem.amount,
+          note: updatedItem.note,
+        },
+      };
+      const result = await transferCollection.updateOne(filter, updateDoc);
       res.send(result);
     });
 
