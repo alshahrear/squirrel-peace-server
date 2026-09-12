@@ -54,6 +54,7 @@ async function run() {
     const expenseCollection = client.db("squirrelDb").collection("expense");
     const routeExpenseCollection = client.db("squirrelDb").collection("routeExpense");
     const transferCollection = client.db("squirrelDb").collection("transfer");
+    const purchaseCollection = client.db("squirrelDb").collection("purchase");
 
 
     // jwt related api
@@ -356,6 +357,59 @@ async function run() {
       const result = await contactCollection.deleteOne(query);
       res.send(result);
     });
+
+
+
+
+    // purchase related api
+
+    app.get('/purchase', async (req, res) => {
+      const result = await purchaseCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.get('/purchase/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await purchaseCollection.findOne(query);
+      res.send(result);
+    });
+
+    app.post('/purchase', async (req, res) => {
+      const item = req.body;
+      const result = await purchaseCollection.insertOne(item);
+      res.send(result);
+    });
+
+    app.delete('/purchase/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await purchaseCollection.deleteOne(query);
+      res.send(result);
+    });
+
+        app.put('/purchase/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const { unsetFields, ...updatedData } = req.body;
+
+      const updateDoc = {
+        $set: updatedData,
+      };
+
+      if (Array.isArray(unsetFields) && unsetFields.length > 0) {
+        updateDoc.$unset = {};
+        unsetFields.forEach((field) => {
+          updateDoc.$unset[field] = "";
+        });
+      }
+
+      const result = await purchaseCollection.updateOne(query, updateDoc);
+      res.send(result);
+    });
+
+
+
 
 
 
