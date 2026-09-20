@@ -55,6 +55,8 @@ async function run() {
     const routeExpenseCollection = client.db("squirrelDb").collection("routeExpense");
     const transferCollection = client.db("squirrelDb").collection("transfer");
     const purchaseCollection = client.db("squirrelDb").collection("purchase");
+        const salesCollection = client.db("squirrelDb").collection("sales");
+    const featureCollection = client.db("squirrelDb").collection("feature");
 
 
     // jwt related api
@@ -388,7 +390,7 @@ async function run() {
       res.send(result);
     });
 
-        app.put('/purchase/:id', async (req, res) => {
+    app.put('/purchase/:id', async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
       const { unsetFields, ...updatedData } = req.body;
@@ -410,7 +412,86 @@ async function run() {
 
 
 
+        // sales related api
 
+    app.get('/sales', async (req, res) => {
+      const result = await salesCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.get('/sales/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await salesCollection.findOne(query);
+      res.send(result);
+    });
+
+    app.post('/sales', async (req, res) => {
+      const item = req.body;
+      const result = await salesCollection.insertOne(item);
+      res.send(result);
+    });
+
+    app.delete('/sales/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await salesCollection.deleteOne(query);
+      res.send(result);
+    });
+
+    app.put('/sales/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const { unsetFields, ...updatedData } = req.body;
+
+      const updateDoc = {
+        $set: updatedData,
+      };
+
+      if (Array.isArray(unsetFields) && unsetFields.length > 0) {
+        updateDoc.$unset = {};
+        unsetFields.forEach((field) => {
+          updateDoc.$unset[field] = "";
+        });
+      }
+
+      const result = await salesCollection.updateOne(query, updateDoc);
+      res.send(result);
+    });
+
+
+
+       // feature (software settings) related api
+
+    // সব feature এর অবস্থা একসাথে: { saveDraft: true, ... }
+    app.get('/feature', async (req, res) => {
+      try {
+        const list = await featureCollection.find().toArray();
+        const result = {};
+        list.forEach((f) => {
+          result[f.key] = f.enabled === true;
+        });
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: 'Failed to fetch features' });
+      }
+    });
+
+    // যেকোনো feature ON/OFF করা (নতুন feature এর জন্য নতুন key দিলেই হবে)
+    app.put('/feature/:key', async (req, res) => {
+      try {
+        const key = req.params.key;
+        const enabled = req.body.enabled === true;
+        const result = await featureCollection.updateOne(
+          { key: key },
+          { $set: { key: key, enabled: enabled, updatedAt: new Date() } },
+          { upsert: true }
+        );
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: 'Failed to update feature' });
+      }
+    });
 
 
     // transfer related api
@@ -944,7 +1025,6 @@ async function run() {
       res.send(result);
     });
 
-
     // Update/Edit a product
     app.put('/product/:id', async (req, res) => {
       const id = req.params.id;
@@ -967,8 +1047,6 @@ async function run() {
           unit: updatedProduct.unit,
           pcsOfUnit: updatedProduct.pcsOfUnit,
           freeProductQty: updatedProduct.freeProductQty,
-          freeProductName: updatedProduct.freeProductName,
-          openingStockQty: updatedProduct.openingStockQty,
           note: updatedProduct.note,
           isActive: updatedProduct.isActive
         },
@@ -982,7 +1060,6 @@ async function run() {
         res.status(500).send({ error: 'Failed to update product' });
       }
     });
-
 
 
 
