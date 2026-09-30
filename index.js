@@ -55,7 +55,8 @@ async function run() {
     const routeExpenseCollection = client.db("squirrelDb").collection("routeExpense");
     const transferCollection = client.db("squirrelDb").collection("transfer");
     const purchaseCollection = client.db("squirrelDb").collection("purchase");
-        const salesCollection = client.db("squirrelDb").collection("sales");
+    const stockPurchaseCollection = client.db("squirrelDb").collection("stock-purchase");
+    const salesCollection = client.db("squirrelDb").collection("sales");
     const featureCollection = client.db("squirrelDb").collection("feature");
 
 
@@ -363,7 +364,22 @@ async function run() {
 
 
 
+
+
     // purchase related api
+
+    // stock-purchase related api
+    app.get('/stock-purchase', async (req, res) => {
+      const result = await stockPurchaseCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.get('/stock-purchase/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await stockPurchaseCollection.findOne(query);
+      res.send(result);
+    });
 
     app.get('/purchase', async (req, res) => {
       const result = await purchaseCollection.find().toArray();
@@ -387,6 +403,9 @@ async function run() {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
       const result = await purchaseCollection.deleteOne(query);
+
+      // purchase delete hole tar stock-purchase batch gulo o delete hobe
+      await stockPurchaseCollection.deleteMany({ purchaseId: id });
       res.send(result);
     });
 
@@ -407,12 +426,121 @@ async function run() {
       }
 
       const result = await purchaseCollection.updateOne(query, updateDoc);
+
+      // Receive hole purchase theke stock-purchase a batch toiri hobe (purchase thakbei)
+      if (updatedData.receiveStatus === 'Received') {
+        // atomic lock: ek shathe 2ta request ashleo shudhu ekta e pass korbe
+        const claim = await purchaseCollection.updateOne(
+          { _id: new ObjectId(id), stockCreated: { $ne: true } },
+          { $set: { stockCreated: true } }
+        );
+        const alreadyInStock = await stockPurchaseCollection.findOne({ purchaseId: id });
+
+        if (claim.modifiedCount === 1 && !alreadyInStock) {
+          const purchase = await purchaseCollection.findOne(query);
+
+          if (purchase) {
+            const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+            const round4 = (n) => Math.round((Number(n) || 0) * 10000) / 10000;
+
+            const items = purchase.items || [];
+            const freeItems = purchase.freeItems || [];
+            const itemsSubtotalSum = items.reduce((s, it) => s + (Number(it.subtotal) || 0), 0);
+            const payable = Number(purchase.payableAmount) || 0;
+
+            // Common info (protita batch a thakbe)
+            const common = {
+              purchaseId: id,
+              invoiceNo: purchase.invoiceNo,
+              company: purchase.company,
+              purchaseDate: purchase.purchaseDate,
+              receiveDate: purchase.receiveDate,
+              createdAt: new Date(),
+            };
+
+            // Main product batch
+            const mainBatches = items.map((it, idx) => {
+              const paidQty = Number(it.totalPcs) || 0;
+              const freeQty = Number(it.freeTotalQty) || 0;
+              const stockQty = paidQty + freeQty;
+              const buyPrice = Number(it.buyPrice) || 0;
+              const grossAmount = round2(buyPrice * paidQty);
+              const itemSubtotal = Number(it.subtotal) || 0;
+              const itemDiscount = round2(grossAmount - itemSubtotal);
+
+              // Overall discount + adjustment, subtotal onujayi bhag kore nilam
+              const netCost = itemsSubtotalSum > 0
+                ? round2((payable * itemSubtotal) / itemsSubtotalSum)
+                : 0;
+
+              return {
+                ...common,
+                batchNo: `${purchase.invoiceNo}-${idx + 1}`,
+                isFreeProduct: false,
+                productId: it.productId,
+                productName: it.productName,
+                unit: it.unit,
+                unitQty: Number(it.unitQty) || 0,
+                pcsQty: Number(it.pcsQty) || 0,
+                buyPrice,                       // list buy price (per pcs)
+                sellPrice: Number(it.sellPrice) || 0, // sell price (per pcs)
+                grossAmount,                    // discount er age
+                itemDiscount,                   // product wise discount
+                netCost,                        // sob discount/adjustment er por total kotho porse
+                paidQty,                        // kena qty
+                freeQty,                        // free pawa qty
+                freeUnitQty: Number(it.freeUnitQty) || 0,
+                freePcsQty: Number(it.freePcsQty) || 0,
+                stockQty,                       // ei batch a mot qty
+                availableQty: stockQty,         // ekhon stock a koto ase
+                costPerPcs: paidQty > 0 ? round4(netCost / paidQty) : 0, // per pcs cost (free qty hisabe dhora hoy na)
+              };
+            });
+
+            // Others Free product batch (cost 0)
+            const freeBatches = freeItems.map((it, idx) => {
+              const qty = Number(it.totalQty) || 0;
+              return {
+                ...common,
+                batchNo: `${purchase.invoiceNo}-F${idx + 1}`,
+                isFreeProduct: true,
+                productId: it.productId,
+                productName: it.productName,
+                unit: it.unit,
+                unitQty: Number(it.unitQty) || 0,
+                pcsQty: Number(it.pcsQty) || 0,
+                buyPrice: 0,
+                sellPrice: Number(it.sellPricePcs) || 0,
+                grossAmount: 0,
+                itemDiscount: 0,
+                netCost: 0,
+                paidQty: 0,
+                freeQty: qty,
+                stockQty: qty,
+                availableQty: qty,
+                costPerPcs: 0,
+              };
+            });
+
+            const allBatches = [...mainBatches, ...freeBatches];
+            if (allBatches.length > 0) {
+              await stockPurchaseCollection.insertMany(allBatches);
+            }
+          }
+        }
+      }
+
       res.send(result);
     });
 
 
 
-        // sales related api
+
+
+
+
+
+    // sales related api
 
     app.get('/sales', async (req, res) => {
       const result = await salesCollection.find().toArray();
@@ -461,7 +589,7 @@ async function run() {
 
 
 
-       // feature (software settings) related api
+    // feature (software settings) related api
 
     // সব feature এর অবস্থা একসাথে: { saveDraft: true, ... }
     app.get('/feature', async (req, res) => {
@@ -477,14 +605,32 @@ async function run() {
       }
     });
 
-    // যেকোনো feature ON/OFF করা (নতুন feature এর জন্য নতুন key দিলেই হবে)
+    // একটা feature এর enabled + value (যেমন saved route / delivery man)
+    app.get('/feature/:key', async (req, res) => {
+      try {
+        const doc = await featureCollection.findOne({ key: req.params.key });
+        res.send({
+          key: req.params.key,
+          enabled: doc ? doc.enabled === true : false,
+          value: doc && doc.value !== undefined ? doc.value : null,
+        });
+      } catch (error) {
+        res.status(500).send({ error: 'Failed to fetch feature' });
+      }
+    });
+
+    // যেকোনো feature ON/OFF করা (নতুন feature এর জন্য নতুন key দিলেই হবে)    
+
     app.put('/feature/:key', async (req, res) => {
       try {
         const key = req.params.key;
         const enabled = req.body.enabled === true;
+        const setFields = { key: key, enabled: enabled, updatedAt: new Date() };
+        // value পাঠালে সেটাও save হবে (যেমন route / delivery man)
+        if (req.body.value !== undefined) setFields.value = req.body.value;
         const result = await featureCollection.updateOne(
           { key: key },
-          { $set: { key: key, enabled: enabled, updatedAt: new Date() } },
+          { $set: setFields },
           { upsert: true }
         );
         res.send(result);
@@ -492,6 +638,13 @@ async function run() {
         res.status(500).send({ error: 'Failed to update feature' });
       }
     });
+
+
+
+
+
+
+
 
 
     // transfer related api
@@ -1046,7 +1199,8 @@ async function run() {
           mrp: updatedProduct.mrp,
           unit: updatedProduct.unit,
           pcsOfUnit: updatedProduct.pcsOfUnit,
-          freeProductQty: updatedProduct.freeProductQty,
+          freeProductUnitQty: updatedProduct.freeProductUnitQty,
+          freeProductPcsQty: updatedProduct.freeProductPcsQty,
           note: updatedProduct.note,
           isActive: updatedProduct.isActive
         },
