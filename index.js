@@ -367,6 +367,41 @@ async function run() {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     // purchase related api
 
     // stock-purchase related api
@@ -380,6 +415,43 @@ async function run() {
       const query = { _id: new ObjectId(id) };
       const result = await stockPurchaseCollection.findOne(query);
       res.send(result);
+    });
+
+    // batch er sell price update (shudhu sellPrice)
+    app.patch('/stock-purchase/:id/sell-price', async (req, res) => {
+      try {
+        const id = req.params.id;
+        const price = Number(req.body.sellPrice);
+        if (isNaN(price) || price < 0) {
+          return res.status(400).send({ message: 'Invalid sell price' });
+        }
+        const rounded = Math.round(price * 100) / 100;
+        const batch = await stockPurchaseCollection.findOne({ _id: new ObjectId(id) });
+        if (!batch) return res.status(404).send({ message: 'Batch not found' });
+
+        const result = await stockPurchaseCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { sellPrice: rounded } }
+        );
+
+        // Purchase er item er sellPrice o update, jate purchase edit korle ei price ashe
+        if (batch.purchaseId) {
+          if (batch.isFreeProduct) {
+            await purchaseCollection.updateOne(
+              { _id: new ObjectId(batch.purchaseId), 'freeItems.productId': batch.productId },
+              { $set: { 'freeItems.$.sellPricePcs': rounded } }
+            );
+          } else {
+            await purchaseCollection.updateOne(
+              { _id: new ObjectId(batch.purchaseId), 'items.productId': batch.productId },
+              { $set: { 'items.$.sellPrice': rounded } }
+            );
+          }
+        }
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: 'Update failed' });
+      }
     });
 
     app.get('/purchase', async (req, res) => {
@@ -613,7 +685,169 @@ async function run() {
     };
 
     // Main -> shudhu main(paid) stock theke, Free/Others -> shudhu free stock theke (FIFO)
-    const buildStockPlan = async (items = [], freeItems = [], excludeSaleId = null) => {
+    const buildStockPlan = async (items = [], freeItems = [], excludeSaleId = null, opts = {}) => {
+     const allowBorrow = opts.allowBorrow === true;
+      const borrowFeatures = await featureCollection
+        .find({ key: { $in: ['mainFromFreeStock', 'freeFromMainStock'] } })
+        .toArray();
+      const allowMainFromFree = borrowFeatures.some((f) => f.key === 'mainFromFreeStock' && f.enabled === true);
+      const allowFreeFromMain = borrowFeatures.some((f) => f.key === 'freeFromMainStock' && f.enabled === true);
+      const need = new Map();
+      const add = (pid, name, main, free, others) => {
+        const total = main + free + others;
+        if (!pid || total <= 0) return;
+        const key = String(pid);
+        if (!need.has(key)) need.set(key, { productName: name, qty: 0, main: 0, free: 0, others: 0 });
+        const n = need.get(key);
+        n.main += main;
+        n.free += free;
+        n.others += others;
+        n.qty += total;
+      };
+      items.forEach((it) => add(it.productId, it.productName, toNum(it.totalPcs), toNum(it.freeQty), 0));
+      freeItems.forEach((it) => add(it.productId, it.productName, 0, 0, toNum(it.totalQty)));
+
+      if (need.size === 0) return { ok: true, shortages: [], borrows: [], allocations: [] };
+
+      const batches = await stockPurchaseCollection
+        .find({
+          $or: [
+            { productId: { $in: [...need.keys()] } },
+            { productName: { $in: [...need.values()].map((n) => n.productName) } },
+          ],
+        })
+        .toArray();
+
+      batches.sort((a, b) => {
+        const diff = batchTime(a) - batchTime(b);
+        if (diff !== 0) return diff;
+        return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      });
+
+      const purchaseIds = [...new Set(batches.map((b) => b.purchaseId).filter(Boolean))]
+        .map((i) => { try { return new ObjectId(i); } catch (e) { return null; } })
+        .filter(Boolean);
+      const purchases = purchaseIds.length
+        ? await purchaseCollection.find({ _id: { $in: purchaseIds } }).toArray()
+        : [];
+      const pMap = new Map(purchases.map((p) => [String(p._id), p]));
+
+      const poolOf = (a) => a.pool || ((a.kind || 'main') === 'main' ? 'paid' : 'free');
+
+      const usedSales = await salesCollection
+        .find({ 'stockAllocations.0': { $exists: true } })
+        .toArray();
+      const used = new Map();
+      usedSales.forEach((s) => {
+        if (excludeSaleId && String(s._id) === String(excludeSaleId)) return;
+        (s.stockAllocations || []).forEach((a) => {
+          const k = String(a.batchId);
+          const cur = used.get(k) || { paid: 0, free: 0 };
+          cur[poolOf(a)] += Math.max(toNum(a.qty) - toNum(a.returned), 0);
+          used.set(k, cur);
+        });
+      });
+
+      const pools = batches.map((b) => {
+        const ret = getBatchReturnedSplit(b, pMap.get(String(b.purchaseId)));
+        const u = used.get(String(b._id)) || { paid: 0, free: 0 };
+        if (b.isFreeProduct) {
+          return { b, paid: 0, free: Math.max(toNum(b.freeQty) - ret.free - (u.paid + u.free), 0) };
+        }
+        return {
+          b,
+          paid: Math.max(toNum(b.paidQty) - ret.paid - u.paid, 0),
+          free: Math.max(toNum(b.freeQty) - ret.free - u.free, 0),
+        };
+      });
+
+      const shortages = [];
+      const borrows = [];
+      const allocations = [];
+
+      const takeFrom = (list, poolKey, kind, pid, want) => {
+        let remaining = want;
+        for (const x of list) {
+          if (remaining <= 0) break;
+          const t = Math.min(x[poolKey], remaining);
+          if (t <= 0) continue;
+          x[poolKey] -= t;
+          allocations.push({
+            batchId: String(x.b._id),
+            batchNo: x.b.batchNo,
+            productId: pid,
+            kind,
+            pool: poolKey,
+            qty: t,
+            returned: 0,
+          });
+          remaining -= t;
+        }
+        return remaining;
+      };
+
+      for (const [pid, n] of need) {
+        const list = pools.filter(
+          (x) => String(x.b.productId) === pid || x.b.productName === n.productName
+        );
+        const totalPaid = list.reduce((s, x) => s + x.paid, 0);
+        const totalFree = list.reduce((s, x) => s + x.free, 0);
+
+        const needMain = n.main;
+        const needFree = n.free + n.others;
+        const mainShort = Math.max(needMain - totalPaid, 0);
+        const freeShort = Math.max(needFree - totalFree, 0);
+        const surplusPaid = Math.max(totalPaid - needMain, 0);
+        const surplusFree = Math.max(totalFree - needFree, 0);
+
+        let mainFromFree = 0;
+        let freeFromMain = 0;
+        let hardShort = false;
+
+        if (mainShort > 0) {
+        if (allowMainFromFree && surplusFree >= mainShort) mainFromFree = mainShort;
+          else {
+          shortages.push({ productName: `${n.productName} (Main)`, need: needMain, available: totalPaid });
+            hardShort = true;
+          }
+        }
+        if (freeShort > 0) {
+         if (allowFreeFromMain && surplusPaid >= freeShort) freeFromMain = freeShort;
+          else {
+           shortages.push({ productName: `${n.productName} (Free)`, need: needFree, available: totalFree });
+            hardShort = true;
+          }
+        }
+        if (hardShort) continue;
+
+        if ((mainFromFree > 0 || freeFromMain > 0) && !allowBorrow) {
+          borrows.push(
+            mainFromFree > 0
+              ? { productName: n.productName, direction: 'free_to_main', need: needMain, have: totalPaid, borrowQty: mainFromFree, otherAvailable: totalFree, otherNeed: needFree }
+              : { productName: n.productName, direction: 'main_to_free', need: needFree, have: totalFree, borrowQty: freeFromMain, otherAvailable: totalPaid, otherNeed: needMain }
+          );
+          continue;
+        }
+
+        takeFrom(list, 'paid', 'main', pid, needMain - mainFromFree);
+        const ownFreeTotal = needFree - freeFromMain;
+        const ownFree = Math.min(n.free, ownFreeTotal);
+        const ownOthers = ownFreeTotal - ownFree;
+        takeFrom(list, 'free', 'free', pid, ownFree);
+        takeFrom(list, 'free', 'others', pid, ownOthers);
+
+        if (mainFromFree > 0) takeFrom(list, 'free', 'main', pid, mainFromFree);
+        if (freeFromMain > 0) {
+          takeFrom(list, 'paid', 'free', pid, n.free - ownFree);
+          takeFrom(list, 'paid', 'others', pid, n.others - ownOthers);
+        }
+      }
+
+      return { ok: shortages.length === 0 && borrows.length === 0, shortages, borrows, allocations };
+    };
+
+    // (purano buildStockPlan, ar use hocche na)
+    const buildStockPlanUnused = async (items = [], freeItems = [], excludeSaleId = null) => {
       const need = new Map();
       const add = (pid, name, main, free, others) => {
         const total = main + free + others;
@@ -869,9 +1103,18 @@ async function run() {
     };
 
     const stockErrorBody = (shortages) => ({
-      message: 'Stock a product nai!',
+     message: 'স্টকে পণ্য নেই!',
       shortages,
     });
+
+    const sendPlanError = (res, plan) => {
+      if (plan.shortages.length > 0) return res.status(400).send(stockErrorBody(plan.shortages));
+      return res.status(409).send({
+        needsConfirm: true,
+       message: 'স্টক সমন্বয় করতে নিশ্চিত করুন',
+        borrows: plan.borrows,
+      });
+    };
 
     // sales related api
 
@@ -888,11 +1131,13 @@ async function run() {
     });
 
     app.post('/sales', async (req, res) => {
-      const item = req.body;
+      const { stockBorrowConfirmed, ...item } = req.body;
       let allocations = [];
       if (item.status === 'Delivered') {
-        const plan = await buildStockPlan(item.items || [], item.freeItems || []);
-        if (!plan.ok) return res.status(400).send(stockErrorBody(plan.shortages));
+        const plan = await buildStockPlan(item.items || [], item.freeItems || [], null, {
+          allowBorrow: stockBorrowConfirmed === true,
+        });
+        if (!plan.ok) return sendPlanError(res, plan);
         allocations = plan.allocations;
         item.stockAllocations = allocations;
       }
@@ -923,7 +1168,8 @@ async function run() {
     app.put('/sales/:id', async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
-      const { unsetFields, ...updatedData } = req.body;
+      const { unsetFields, stockBorrowConfirmed, ...updatedData } = req.body;
+      const allowBorrow = stockBorrowConfirmed === true;
 
       const updateDoc = {
         $set: updatedData,
@@ -944,9 +1190,10 @@ async function run() {
         const plan = await buildStockPlan(
           updatedData.items ?? existingSale.items ?? [],
           updatedData.freeItems ?? existingSale.freeItems ?? [],
-          id
+          id,
+          { allowBorrow }
         );
-        if (!plan.ok) return res.status(400).send(stockErrorBody(plan.shortages));
+        if (!plan.ok) return sendPlanError(res, plan);
         allocationsToApply = plan.allocations;
         updatedData.stockAllocations = plan.allocations;
       } else if (
@@ -979,11 +1226,12 @@ async function run() {
         const plan = await buildStockPlan(
           updatedData.items,
           updatedData.freeItems ?? existingSale.freeItems ?? [],
-          id
+          id,
+          { allowBorrow }
         );
         if (!plan.ok) {
           await restoreOld(-1);
-          return res.status(400).send(stockErrorBody(plan.shortages));
+          return sendPlanError(res, plan);
         }
         allocationsToApply = plan.allocations;
         updatedData.stockAllocations = plan.allocations;
@@ -993,6 +1241,30 @@ async function run() {
       if (allocationsToApply) await applyAllocations(allocationsToApply);
       res.send(result);
     });
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -1930,11 +2202,6 @@ async function run() {
         res.status(500).send({ message: "Error deleting category", error });
       }
     });
-
-
-
-
-
 
 
 
