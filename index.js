@@ -4,9 +4,6 @@ const express = require('express');
 const app = express();
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
-const { SitemapStream } = require("sitemap");
-const { createGzip } = require("zlib");
-const slugify = require('slugify');
 const { MongoClient, ServerApiVersion, ObjectId, } = require('mongodb');
 require('dotenv').config();
 const port = process.env.PORT || 5000;
@@ -34,13 +31,9 @@ async function run() {
 
     const usersCollection = client.db("squirrelDb").collection("users");
     const contactCollection = client.db("squirrelDb").collection("contact");
-    const productsCollection = client.db("squirrelDb").collection("products");
     const productCollection = client.db("squirrelDb").collection("product");
     const unitCollection = client.db("squirrelDb").collection("unit");
     const categoryCollection = client.db("squirrelDb").collection("category");
-    const itemCollection = client.db("squirrelDb").collection("item");
-    const trashCollection = client.db("squirrelDb").collection("trash");
-    const shopCollection = client.db("squirrelDb").collection("shop");
     const companyCollection = client.db("squirrelDb").collection("company");
     const customerCollection = client.db("squirrelDb").collection("customer");
     const routeCollection = client.db("squirrelDb").collection("route");
@@ -58,6 +51,10 @@ async function run() {
     const stockPurchaseCollection = client.db("squirrelDb").collection("stock-purchase");
     const salesCollection = client.db("squirrelDb").collection("sales");
     const featureCollection = client.db("squirrelDb").collection("feature");
+    const purchaseBulkReturnCollection = client.db("squirrelDb").collection("purchaseBulkReturn");
+    const salesBulkReturnCollection = client.db("squirrelDb").collection("salesBulkReturn");
+    const salesDamageCollection = client.db("squirrelDb").collection('salesDamage');
+    const damageReturnCollection = client.db("squirrelDb").collection('damageReturn');
 
 
     // jwt related api
@@ -362,929 +359,6 @@ async function run() {
     });
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // purchase related api
-
-    // stock-purchase related api
-    app.get('/stock-purchase', async (req, res) => {
-      const result = await stockPurchaseCollection.find().toArray();
-      res.send(result);
-    });
-
-    app.get('/stock-purchase/:id', async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
-      const result = await stockPurchaseCollection.findOne(query);
-      res.send(result);
-    });
-
-    // batch er sell price update (shudhu sellPrice)
-    app.patch('/stock-purchase/:id/sell-price', async (req, res) => {
-      try {
-        const id = req.params.id;
-        const price = Number(req.body.sellPrice);
-        if (isNaN(price) || price < 0) {
-          return res.status(400).send({ message: 'Invalid sell price' });
-        }
-        const rounded = Math.round(price * 100) / 100;
-        const batch = await stockPurchaseCollection.findOne({ _id: new ObjectId(id) });
-        if (!batch) return res.status(404).send({ message: 'Batch not found' });
-
-        const result = await stockPurchaseCollection.updateOne(
-          { _id: new ObjectId(id) },
-          { $set: { sellPrice: rounded } }
-        );
-
-        // Purchase er item er sellPrice o update, jate purchase edit korle ei price ashe
-        if (batch.purchaseId) {
-          if (batch.isFreeProduct) {
-            await purchaseCollection.updateOne(
-              { _id: new ObjectId(batch.purchaseId), 'freeItems.productId': batch.productId },
-              { $set: { 'freeItems.$.sellPricePcs': rounded } }
-            );
-          } else {
-            await purchaseCollection.updateOne(
-              { _id: new ObjectId(batch.purchaseId), 'items.productId': batch.productId },
-              { $set: { 'items.$.sellPrice': rounded } }
-            );
-          }
-        }
-        res.send(result);
-      } catch (err) {
-        res.status(500).send({ message: 'Update failed' });
-      }
-    });
-
-    app.get('/purchase', async (req, res) => {
-      const result = await purchaseCollection.find().toArray();
-      res.send(result);
-    });
-
-    app.get('/purchase/:id', async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
-      const result = await purchaseCollection.findOne(query);
-      res.send(result);
-    });
-
-    app.post('/purchase', async (req, res) => {
-      const item = req.body;
-      const result = await purchaseCollection.insertOne(item);
-      res.send(result);
-    });
-
-    app.delete('/purchase/:id', async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
-      const result = await purchaseCollection.deleteOne(query);
-
-      // purchase delete hole tar stock-purchase batch gulo o delete hobe
-      await stockPurchaseCollection.deleteMany({ purchaseId: id });
-      res.send(result);
-    });
-
-    app.put('/purchase/:id', async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
-      const { unsetFields, stockCreated: _ignoreStockCreated, _id: _ignoreId, ...updatedData } = req.body;
-
-      const updateDoc = {
-        $set: updatedData,
-      };
-
-      if (Array.isArray(unsetFields) && unsetFields.length > 0) {
-        updateDoc.$unset = {};
-        unsetFields.forEach((field) => {
-          updateDoc.$unset[field] = "";
-        });
-      }
-
-      // Already Received purchase edit hole purana batch muche notun kore banano hobe
-      const oldPurchase = await purchaseCollection.findOne(query);
-      const wasReceived = oldPurchase?.receiveStatus === 'Received' || oldPurchase?.receiveStatus === 'Yes';
-      if (wasReceived && updatedData.receiveStatus === 'Received' && !Array.isArray(updatedData.returnHistory)) {
-        await stockPurchaseCollection.deleteMany({ purchaseId: id });
-        await purchaseCollection.updateOne(query, { $unset: { stockCreated: "" } });
-      }
-
-      const result = await purchaseCollection.updateOne(query, updateDoc);
-
-      // Receive hole purchase theke stock-purchase a batch toiri hobe (purchase thakbei)
-      if (updatedData.receiveStatus === 'Received') {
-        // atomic lock: ek shathe 2ta request ashleo shudhu ekta e pass korbe
-        const claim = await purchaseCollection.updateOne(
-          { _id: new ObjectId(id), stockCreated: { $ne: true } },
-          { $set: { stockCreated: true } }
-        );
-        const alreadyInStock = await stockPurchaseCollection.findOne({ purchaseId: id });
-
-        if (claim.modifiedCount === 1 && !alreadyInStock) {
-          const purchase = await purchaseCollection.findOne(query);
-
-          if (purchase) {
-            const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
-            const round4 = (n) => Math.round((Number(n) || 0) * 10000) / 10000;
-
-            const items = purchase.items || [];
-            const freeItems = purchase.freeItems || [];
-            const itemsSubtotalSum = items.reduce((s, it) => s + (Number(it.subtotal) || 0), 0);
-            const payable = Number(purchase.payableAmount) || 0;
-
-            // Common info (protita batch a thakbe)
-            const common = {
-              purchaseId: id,
-              invoiceNo: purchase.invoiceNo,
-              company: purchase.company,
-              purchaseDate: purchase.purchaseDate,
-              receiveDate: purchase.receiveDate,
-              createdAt: new Date(),
-            };
-
-            // Main product batch
-            const mainBatches = items.map((it, idx) => {
-              const paidQty = Number(it.totalPcs) || 0;
-              const freeQty = Number(it.freeTotalQty) || 0;
-              const stockQty = paidQty + freeQty;
-              const buyPrice = Number(it.buyPrice) || 0;
-              const grossAmount = round2(buyPrice * paidQty);
-              const itemSubtotal = Number(it.subtotal) || 0;
-              const itemDiscount = round2(grossAmount - itemSubtotal);
-
-              // Overall discount + adjustment, subtotal onujayi bhag kore nilam
-              const netCost = itemsSubtotalSum > 0
-                ? round2((payable * itemSubtotal) / itemsSubtotalSum)
-                : 0;
-
-              return {
-                ...common,
-                batchNo: `${purchase.invoiceNo}-${idx + 1}`,
-                isFreeProduct: false,
-                parentMode: it.parentMode === true,
-                subUnit: it.subUnit || '',
-                pcsPerUnit: Number(it.pcsPerUnit) || 1,
-                pcsPerSub: Number(it.pcsPerSub) || 0,
-                subQty: Number(it.subQty) || 0,
-                freeSubQty: Number(it.freeSubQty) || 0,
-                productId: it.productId,
-                productName: it.productName,
-                unit: it.unit,
-                unitQty: Number(it.unitQty) || 0,
-                pcsQty: Number(it.pcsQty) || 0,
-                buyPrice,                       // list buy price (per pcs)
-                sellPrice: Number(it.sellPrice) || 0, // sell price (per pcs)
-                grossAmount,                    // discount er age
-                itemDiscount,                   // product wise discount
-                netCost,                        // sob discount/adjustment er por total kotho porse
-                paidQty,                        // kena qty
-                freeQty,                        // free pawa qty
-                freeUnitQty: Number(it.freeUnitQty) || 0,
-                freePcsQty: Number(it.freePcsQty) || 0,
-                stockQty,                       // ei batch a mot qty
-                availableQty: stockQty,         // ekhon stock a koto ase
-                costPerPcs: paidQty > 0 ? round4(netCost / paidQty) : 0, // per pcs cost (free qty hisabe dhora hoy na)
-              };
-            });
-
-            // Others Free product batch (cost 0)
-            const freeBatches = freeItems.map((it, idx) => {
-              const qty = Number(it.totalQty) || 0;
-              return {
-                ...common,
-                batchNo: `${purchase.invoiceNo}-F${idx + 1}`,
-                isFreeProduct: true,
-                parentMode: it.parentMode === true,
-                subUnit: it.subUnit || '',
-                pcsPerUnit: Number(it.pcsPerUnit) || 1,
-                pcsPerSub: Number(it.pcsPerSub) || 0,
-                subQty: Number(it.subQty) || 0,
-                productId: it.productId,
-                productName: it.productName,
-                unit: it.unit,
-                unitQty: Number(it.unitQty) || 0,
-                pcsQty: Number(it.pcsQty) || 0,
-                buyPrice: 0,
-                sellPrice: Number(it.sellPricePcs) || 0,
-                grossAmount: 0,
-                itemDiscount: 0,
-                netCost: 0,
-                paidQty: 0,
-                freeQty: qty,
-                stockQty: qty,
-                availableQty: qty,
-                costPerPcs: 0,
-              };
-            });
-
-            const allBatches = [...mainBatches, ...freeBatches];
-            if (allBatches.length > 0) {
-              await stockPurchaseCollection.insertMany(allBatches);
-            }
-          }
-        }
-      }
-
-      res.send(result);
-    });
-
-
-
-    // ===== Sales stock helpers =====
-    const toNum = (v) => Number(v) || 0;
-
-    // purchase return বাদ দিয়ে batch এর return qty
-    const getBatchReturned = (batch, purchase) => {
-      let ret = 0;
-      (purchase?.returnHistory || []).forEach((r) => {
-        if (batch.isFreeProduct) {
-          (r.freeItems || []).forEach((it) => {
-            if (it.productId === batch.productId) ret += toNum(it.returnTotalQty);
-          });
-        } else {
-          (r.items || []).forEach((it) => {
-            if (it.productId === batch.productId) {
-              ret += toNum(it.returnTotalQty) + toNum(it.returnFreeTotalQty ?? it.returnFreeQty);
-            }
-          });
-        }
-      });
-      return ret;
-    };
-
-    // batch er date (receiveDate -> purchaseDate -> createdAt) theke time ber kora
-    const batchTime = (b) => {
-      const s = String(b.receiveDate || b.purchaseDate || '').split(',')[0].trim();
-      let t = NaN;
-      if (s.includes('/')) {
-        const [d, m, y] = s.split('/').map(Number);
-        t = new Date(y, m - 1, d).getTime();
-      } else if (s) {
-        t = new Date(s).getTime();
-      }
-      return isNaN(t) ? new Date(b.createdAt).getTime() : t;
-    };
-
-    // stock check + FIFO (purane batch age) allocation
-    // purchase return (paid / free alada)
-    const getBatchReturnedSplit = (batch, purchase) => {
-      let paid = 0;
-      let free = 0;
-      (purchase?.returnHistory || []).forEach((r) => {
-        if (batch.isFreeProduct) {
-          (r.freeItems || []).forEach((it) => {
-            if (it.productId === batch.productId) free += toNum(it.returnTotalQty);
-          });
-        } else {
-          (r.items || []).forEach((it) => {
-            if (it.productId === batch.productId) {
-              paid += toNum(it.returnTotalQty);
-              free += toNum(it.returnFreeTotalQty ?? it.returnFreeQty);
-            }
-          });
-        }
-      });
-      return { paid, free };
-    };
-
-    // Main -> shudhu main(paid) stock theke, Free/Others -> shudhu free stock theke (FIFO)
-    const buildStockPlan = async (items = [], freeItems = [], excludeSaleId = null, opts = {}) => {
-     const allowBorrow = opts.allowBorrow === true;
-      const borrowFeatures = await featureCollection
-        .find({ key: { $in: ['mainFromFreeStock', 'freeFromMainStock'] } })
-        .toArray();
-      const allowMainFromFree = borrowFeatures.some((f) => f.key === 'mainFromFreeStock' && f.enabled === true);
-      const allowFreeFromMain = borrowFeatures.some((f) => f.key === 'freeFromMainStock' && f.enabled === true);
-      const need = new Map();
-      const add = (pid, name, main, free, others) => {
-        const total = main + free + others;
-        if (!pid || total <= 0) return;
-        const key = String(pid);
-        if (!need.has(key)) need.set(key, { productName: name, qty: 0, main: 0, free: 0, others: 0 });
-        const n = need.get(key);
-        n.main += main;
-        n.free += free;
-        n.others += others;
-        n.qty += total;
-      };
-      items.forEach((it) => add(it.productId, it.productName, toNum(it.totalPcs), toNum(it.freeQty), 0));
-      freeItems.forEach((it) => add(it.productId, it.productName, 0, 0, toNum(it.totalQty)));
-
-      if (need.size === 0) return { ok: true, shortages: [], borrows: [], allocations: [] };
-
-      const batches = await stockPurchaseCollection
-        .find({
-          $or: [
-            { productId: { $in: [...need.keys()] } },
-            { productName: { $in: [...need.values()].map((n) => n.productName) } },
-          ],
-        })
-        .toArray();
-
-      batches.sort((a, b) => {
-        const diff = batchTime(a) - batchTime(b);
-        if (diff !== 0) return diff;
-        return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-      });
-
-      const purchaseIds = [...new Set(batches.map((b) => b.purchaseId).filter(Boolean))]
-        .map((i) => { try { return new ObjectId(i); } catch (e) { return null; } })
-        .filter(Boolean);
-      const purchases = purchaseIds.length
-        ? await purchaseCollection.find({ _id: { $in: purchaseIds } }).toArray()
-        : [];
-      const pMap = new Map(purchases.map((p) => [String(p._id), p]));
-
-      const poolOf = (a) => a.pool || ((a.kind || 'main') === 'main' ? 'paid' : 'free');
-
-      const usedSales = await salesCollection
-        .find({ 'stockAllocations.0': { $exists: true } })
-        .toArray();
-      const used = new Map();
-      usedSales.forEach((s) => {
-        if (excludeSaleId && String(s._id) === String(excludeSaleId)) return;
-        (s.stockAllocations || []).forEach((a) => {
-          const k = String(a.batchId);
-          const cur = used.get(k) || { paid: 0, free: 0 };
-          cur[poolOf(a)] += Math.max(toNum(a.qty) - toNum(a.returned), 0);
-          used.set(k, cur);
-        });
-      });
-
-      const pools = batches.map((b) => {
-        const ret = getBatchReturnedSplit(b, pMap.get(String(b.purchaseId)));
-        const u = used.get(String(b._id)) || { paid: 0, free: 0 };
-        if (b.isFreeProduct) {
-          return { b, paid: 0, free: Math.max(toNum(b.freeQty) - ret.free - (u.paid + u.free), 0) };
-        }
-        return {
-          b,
-          paid: Math.max(toNum(b.paidQty) - ret.paid - u.paid, 0),
-          free: Math.max(toNum(b.freeQty) - ret.free - u.free, 0),
-        };
-      });
-
-      const shortages = [];
-      const borrows = [];
-      const allocations = [];
-
-      const takeFrom = (list, poolKey, kind, pid, want) => {
-        let remaining = want;
-        for (const x of list) {
-          if (remaining <= 0) break;
-          const t = Math.min(x[poolKey], remaining);
-          if (t <= 0) continue;
-          x[poolKey] -= t;
-          allocations.push({
-            batchId: String(x.b._id),
-            batchNo: x.b.batchNo,
-            productId: pid,
-            kind,
-            pool: poolKey,
-            qty: t,
-            returned: 0,
-          });
-          remaining -= t;
-        }
-        return remaining;
-      };
-
-      for (const [pid, n] of need) {
-        const list = pools.filter(
-          (x) => String(x.b.productId) === pid || x.b.productName === n.productName
-        );
-        const totalPaid = list.reduce((s, x) => s + x.paid, 0);
-        const totalFree = list.reduce((s, x) => s + x.free, 0);
-
-        const needMain = n.main;
-        const needFree = n.free + n.others;
-        const mainShort = Math.max(needMain - totalPaid, 0);
-        const freeShort = Math.max(needFree - totalFree, 0);
-        const surplusPaid = Math.max(totalPaid - needMain, 0);
-        const surplusFree = Math.max(totalFree - needFree, 0);
-
-        let mainFromFree = 0;
-        let freeFromMain = 0;
-        let hardShort = false;
-
-        if (mainShort > 0) {
-        if (allowMainFromFree && surplusFree >= mainShort) mainFromFree = mainShort;
-          else {
-          shortages.push({ productName: `${n.productName} (Main)`, need: needMain, available: totalPaid });
-            hardShort = true;
-          }
-        }
-        if (freeShort > 0) {
-         if (allowFreeFromMain && surplusPaid >= freeShort) freeFromMain = freeShort;
-          else {
-           shortages.push({ productName: `${n.productName} (Free)`, need: needFree, available: totalFree });
-            hardShort = true;
-          }
-        }
-        if (hardShort) continue;
-
-        if ((mainFromFree > 0 || freeFromMain > 0) && !allowBorrow) {
-          borrows.push(
-            mainFromFree > 0
-              ? { productName: n.productName, direction: 'free_to_main', need: needMain, have: totalPaid, borrowQty: mainFromFree, otherAvailable: totalFree, otherNeed: needFree }
-              : { productName: n.productName, direction: 'main_to_free', need: needFree, have: totalFree, borrowQty: freeFromMain, otherAvailable: totalPaid, otherNeed: needMain }
-          );
-          continue;
-        }
-
-        takeFrom(list, 'paid', 'main', pid, needMain - mainFromFree);
-        const ownFreeTotal = needFree - freeFromMain;
-        const ownFree = Math.min(n.free, ownFreeTotal);
-        const ownOthers = ownFreeTotal - ownFree;
-        takeFrom(list, 'free', 'free', pid, ownFree);
-        takeFrom(list, 'free', 'others', pid, ownOthers);
-
-        if (mainFromFree > 0) takeFrom(list, 'free', 'main', pid, mainFromFree);
-        if (freeFromMain > 0) {
-          takeFrom(list, 'paid', 'free', pid, n.free - ownFree);
-          takeFrom(list, 'paid', 'others', pid, n.others - ownOthers);
-        }
-      }
-
-      return { ok: shortages.length === 0 && borrows.length === 0, shortages, borrows, allocations };
-    };
-
-    // (purano buildStockPlan, ar use hocche na)
-    const buildStockPlanUnused = async (items = [], freeItems = [], excludeSaleId = null) => {
-      const need = new Map();
-      const add = (pid, name, main, free, others) => {
-        const total = main + free + others;
-        if (!pid || total <= 0) return;
-        const key = String(pid);
-        if (!need.has(key)) need.set(key, { productName: name, qty: 0, main: 0, free: 0, others: 0 });
-        const n = need.get(key);
-        n.main += main;
-        n.free += free;
-        n.others += others;
-        n.qty += total;
-      };
-      items.forEach((it) => add(it.productId, it.productName, toNum(it.totalPcs), toNum(it.freeQty), 0));
-      freeItems.forEach((it) => add(it.productId, it.productName, 0, 0, toNum(it.totalQty)));
-
-      if (need.size === 0) return { ok: true, shortages: [], allocations: [] };
-
-      const batches = await stockPurchaseCollection
-        .find({
-          $or: [
-            { productId: { $in: [...need.keys()] } },
-            { productName: { $in: [...need.values()].map((n) => n.productName) } },
-          ],
-        })
-        .toArray();
-
-      batches.sort((a, b) => {
-        const diff = batchTime(a) - batchTime(b);
-        if (diff !== 0) return diff;
-        return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-      });
-
-      const purchaseIds = [...new Set(batches.map((b) => b.purchaseId).filter(Boolean))]
-        .map((i) => { try { return new ObjectId(i); } catch (e) { return null; } })
-        .filter(Boolean);
-      const purchases = purchaseIds.length
-        ? await purchaseCollection.find({ _id: { $in: purchaseIds } }).toArray()
-        : [];
-      const pMap = new Map(purchases.map((p) => [String(p._id), p]));
-
-      // ager sales theke batch wise main/free/others koto gese
-      const usedSales = await salesCollection
-        .find({ 'stockAllocations.0': { $exists: true } })
-        .toArray();
-      const used = new Map();
-      usedSales.forEach((s) => {
-        if (excludeSaleId && String(s._id) === String(excludeSaleId)) return;
-        (s.stockAllocations || []).forEach((a) => {
-          const k = String(a.batchId);
-          const cur = used.get(k) || { main: 0, free: 0, others: 0 };
-          const kind = a.kind || 'main';
-          cur[kind] = (cur[kind] || 0) + Math.max(toNum(a.qty) - toNum(a.returned), 0);
-          used.set(k, cur);
-        });
-      });
-
-      // protita batch er alada paid pool & free pool
-      const pools = batches.map((b) => {
-        const ret = getBatchReturnedSplit(b, pMap.get(String(b.purchaseId)));
-        const u = used.get(String(b._id)) || { main: 0, free: 0, others: 0 };
-        if (b.isFreeProduct) {
-          return {
-            b,
-            paid: 0,
-            free: Math.max(toNum(b.freeQty) - ret.free - (u.main + u.free + u.others), 0),
-          };
-        }
-        return {
-          b,
-          paid: Math.max(toNum(b.paidQty) - ret.paid - u.main, 0),
-          free: Math.max(toNum(b.freeQty) - ret.free - u.free - u.others, 0),
-        };
-      });
-
-      const shortages = [];
-      const allocations = [];
-
-      for (const [pid, n] of need) {
-        const list = pools.filter(
-          (x) => String(x.b.productId) === pid || x.b.productName === n.productName
-        );
-        const totalPaid = list.reduce((s, x) => s + x.paid, 0);
-        const totalFree = list.reduce((s, x) => s + x.free, 0);
-
-        let short = false;
-        if (totalPaid < n.main) {
-          shortages.push({ productName: `${n.productName} (Main)`, need: n.main, available: totalPaid });
-          short = true;
-        }
-        if (totalFree < n.free + n.others) {
-          shortages.push({ productName: `${n.productName} (Free)`, need: n.free + n.others, available: totalFree });
-          short = true;
-        }
-        if (short) continue;
-
-        for (const [kind, want] of [['main', n.main], ['free', n.free], ['others', n.others]]) {
-          let remaining = want;
-          const poolKey = kind === 'main' ? 'paid' : 'free';
-          for (const x of list) {
-            if (remaining <= 0) break;
-            const take = Math.min(x[poolKey], remaining);
-            if (take <= 0) continue;
-            x[poolKey] -= take;
-            allocations.push({ batchId: String(x.b._id), batchNo: x.b.batchNo, productId: pid, kind, qty: take, returned: 0 });
-            remaining -= take;
-          }
-        }
-      }
-
-      return { ok: shortages.length === 0, shortages, allocations };
-    };
-
-    // (purano version, ar use hocche na)
-    const buildStockPlanOld = async (items = [], freeItems = []) => {
-      const need = new Map();
-      const add = (pid, name, main, free, others) => {
-        const total = main + free + others;
-        if (!pid || total <= 0) return;
-        const key = String(pid);
-        if (!need.has(key)) need.set(key, { productName: name, qty: 0, main: 0, free: 0, others: 0 });
-        const n = need.get(key);
-        n.main += main;
-        n.free += free;
-        n.others += others;
-        n.qty += total;
-      };
-      items.forEach((it) => add(it.productId, it.productName, toNum(it.totalPcs), toNum(it.freeQty), 0));
-      freeItems.forEach((it) => add(it.productId, it.productName, 0, 0, toNum(it.totalQty)));
-
-      if (need.size === 0) return { ok: true, shortages: [], allocations: [] };
-
-      const batches = await stockPurchaseCollection
-        .find({
-          $or: [
-            { productId: { $in: [...need.keys()] } },
-            { productName: { $in: [...need.values()].map((n) => n.productName) } },
-          ],
-        })
-        .toArray();
-
-      // FIFO: age je purchase/receive hoyeche sheta age use hobe
-      batches.sort((a, b) => {
-        const diff = batchTime(a) - batchTime(b);
-        if (diff !== 0) return diff;
-        return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-      });
-
-      const purchaseIds = [...new Set(batches.map((b) => b.purchaseId).filter(Boolean))]
-        .map((i) => { try { return new ObjectId(i); } catch (e) { return null; } })
-        .filter(Boolean);
-      const purchases = purchaseIds.length
-        ? await purchaseCollection.find({ _id: { $in: purchaseIds } }).toArray()
-        : [];
-      const pMap = new Map(purchases.map((p) => [String(p._id), p]));
-
-      const shortages = [];
-      const allocations = [];
-
-      for (const [pid, n] of need) {
-        const list = batches
-          .filter((b) => String(b.productId) === pid || b.productName === n.productName)
-          .map((b) => ({
-            b,
-            avail: Math.max(toNum(b.availableQty) - getBatchReturned(b, pMap.get(String(b.purchaseId))), 0),
-          }));
-        const totalAvail = list.reduce((s, x) => s + x.avail, 0);
-
-        if (totalAvail < n.qty) {
-          shortages.push({ productName: n.productName, need: n.qty, available: totalAvail });
-          continue;
-        }
-
-        for (const [kind, want] of [['main', n.main], ['free', n.free], ['others', n.others]]) {
-          let remaining = want;
-          for (const x of list) {
-            if (remaining <= 0) break;
-            const take = Math.min(x.avail, remaining);
-            if (take <= 0) continue;
-            x.avail -= take;
-            allocations.push({ batchId: String(x.b._id), batchNo: x.b.batchNo, productId: pid, kind, qty: take, returned: 0 });
-            remaining -= take;
-          }
-        }
-      }
-
-      return { ok: shortages.length === 0, shortages, allocations };
-    };
-
-    const applyAllocations = async (allocations = []) => {
-      for (const a of allocations) {
-        await stockPurchaseCollection.updateOne(
-          { _id: new ObjectId(a.batchId) },
-          { $inc: { availableQty: -toNum(a.qty) } }
-        );
-      }
-    };
-
-    // sales return history theke product wise total return qty
-    const sumReturns = (history = []) => {
-      const map = new Map();
-      const add = (pid, kind, qty) => {
-        const k = `${pid}|${kind}`;
-        map.set(k, (map.get(k) || 0) + qty);
-      };
-      (history || []).forEach((r) => {
-        (r.items || []).forEach((it) => {
-          add(it.productId, 'main', toNum(it.returnTotalQty));
-          add(it.productId, 'free', toNum(it.returnFreeTotalQty ?? it.returnFreeQty));
-        });
-        (r.freeItems || []).forEach((it) => add(it.productId, 'others', toNum(it.returnTotalQty)));
-      });
-      return map;
-    };
-
-    // customer return korle stock e ferot, return edit/delete korle abar kome
-    const adjustReturnStock = async (existing, newHistory) => {
-      const allocs = (existing.stockAllocations || []).map((a) => ({ ...a, returned: toNum(a.returned) }));
-      const oldMap = sumReturns(existing.returnHistory);
-      const newMap = sumReturns(newHistory);
-      const pids = new Set([...oldMap.keys(), ...newMap.keys()]);
-
-      for (const key of pids) {
-        const sep = key.lastIndexOf('|');
-        const pid = key.slice(0, sep);
-        const kind = key.slice(sep + 1);
-        let delta = (newMap.get(key) || 0) - (oldMap.get(key) || 0);
-        const list = allocs
-          .filter((a) => String(a.productId) === pid && (a.kind || 'main') === kind)
-          .reverse();
-
-        if (delta > 0) {
-          for (const a of list) {
-            if (delta <= 0) break;
-            const take = Math.min(toNum(a.qty) - a.returned, delta);
-            if (take <= 0) continue;
-            a.returned += take;
-            delta -= take;
-            await stockPurchaseCollection.updateOne({ _id: new ObjectId(a.batchId) }, { $inc: { availableQty: take } });
-          }
-        } else if (delta < 0) {
-          delta = -delta;
-          for (const a of list) {
-            if (delta <= 0) break;
-            const take = Math.min(a.returned, delta);
-            if (take <= 0) continue;
-            a.returned -= take;
-            delta -= take;
-            await stockPurchaseCollection.updateOne({ _id: new ObjectId(a.batchId) }, { $inc: { availableQty: -take } });
-          }
-        }
-      }
-      return allocs;
-    };
-
-    const stockErrorBody = (shortages) => ({
-     message: 'স্টকে পণ্য নেই!',
-      shortages,
-    });
-
-    const sendPlanError = (res, plan) => {
-      if (plan.shortages.length > 0) return res.status(400).send(stockErrorBody(plan.shortages));
-      return res.status(409).send({
-        needsConfirm: true,
-       message: 'স্টক সমন্বয় করতে নিশ্চিত করুন',
-        borrows: plan.borrows,
-      });
-    };
-
-    // sales related api
-
-    app.get('/sales', async (req, res) => {
-      const result = await salesCollection.find().toArray();
-      res.send(result);
-    });
-
-    app.get('/sales/:id', async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
-      const result = await salesCollection.findOne(query);
-      res.send(result);
-    });
-
-    app.post('/sales', async (req, res) => {
-      const { stockBorrowConfirmed, ...item } = req.body;
-      let allocations = [];
-      if (item.status === 'Delivered') {
-        const plan = await buildStockPlan(item.items || [], item.freeItems || [], null, {
-          allowBorrow: stockBorrowConfirmed === true,
-        });
-        if (!plan.ok) return sendPlanError(res, plan);
-        allocations = plan.allocations;
-        item.stockAllocations = allocations;
-      }
-      const result = await salesCollection.insertOne(item);
-      if (allocations.length > 0) await applyAllocations(allocations);
-      res.send(result);
-    });
-
-    app.delete('/sales/:id', async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
-      const existingSale = await salesCollection.findOne(query);
-      const result = await salesCollection.deleteOne(query);
-
-      // delivered order delete hole stock ferot jabe
-      for (const a of existingSale?.stockAllocations || []) {
-        const back = toNum(a.qty) - toNum(a.returned);
-        if (back > 0) {
-          await stockPurchaseCollection.updateOne(
-            { _id: new ObjectId(a.batchId) },
-            { $inc: { availableQty: back } }
-          );
-        }
-      }
-      res.send(result);
-    });
-
-    app.put('/sales/:id', async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
-      const { unsetFields, stockBorrowConfirmed, ...updatedData } = req.body;
-      const allowBorrow = stockBorrowConfirmed === true;
-
-      const updateDoc = {
-        $set: updatedData,
-      };
-
-      if (Array.isArray(unsetFields) && unsetFields.length > 0) {
-        updateDoc.$unset = {};
-        unsetFields.forEach((field) => {
-          updateDoc.$unset[field] = "";
-        });
-      }
-
-      const existingSale = await salesCollection.findOne(query);
-      let allocationsToApply = null;
-
-      if (existingSale && updatedData.status === 'Delivered' && existingSale.status !== 'Delivered') {
-        // Delivery: age stock check
-        const plan = await buildStockPlan(
-          updatedData.items ?? existingSale.items ?? [],
-          updatedData.freeItems ?? existingSale.freeItems ?? [],
-          id,
-          { allowBorrow }
-        );
-        if (!plan.ok) return sendPlanError(res, plan);
-        allocationsToApply = plan.allocations;
-        updatedData.stockAllocations = plan.allocations;
-      } else if (
-        existingSale &&
-        Array.isArray(updatedData.returnHistory) &&
-        (existingSale.stockAllocations || []).length > 0
-      ) {
-        // Sales return: stock adjust
-        updatedData.stockAllocations = await adjustReturnStock(existingSale, updatedData.returnHistory);
-      } else if (
-        existingSale &&
-        existingSale.status === 'Delivered' &&
-        Array.isArray(updatedData.items) &&
-        !Array.isArray(updatedData.returnHistory) &&
-        (existingSale.returnHistory || []).length === 0
-      ) {
-        // Delivered order edit: purano stock ferot diye notun kore allocate
-        const restoreOld = async (sign) => {
-          for (const a of existingSale.stockAllocations || []) {
-            const back = toNum(a.qty) - toNum(a.returned);
-            if (back > 0) {
-              await stockPurchaseCollection.updateOne(
-                { _id: new ObjectId(a.batchId) },
-                { $inc: { availableQty: sign * back } }
-              );
-            }
-          }
-        };
-        await restoreOld(1);
-        const plan = await buildStockPlan(
-          updatedData.items,
-          updatedData.freeItems ?? existingSale.freeItems ?? [],
-          id,
-          { allowBorrow }
-        );
-        if (!plan.ok) {
-          await restoreOld(-1);
-          return sendPlanError(res, plan);
-        }
-        allocationsToApply = plan.allocations;
-        updatedData.stockAllocations = plan.allocations;
-      }
-
-      const result = await salesCollection.updateOne(query, updateDoc);
-      if (allocationsToApply) await applyAllocations(allocationsToApply);
-      res.send(result);
-    });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     // feature (software settings) related api
 
     // সব feature এর অবস্থা একসাথে: { saveDraft: true, ... }
@@ -1344,13 +418,6 @@ async function run() {
         res.status(500).send({ error: 'Failed to delete feature' });
       }
     });
-
-
-
-
-
-
-
 
 
     // transfer related api
@@ -2206,340 +1273,1457 @@ async function run() {
 
 
 
-    // shop related api
 
 
-    app.get('/shop', async (req, res) => {
-      const result = await shopCollection.find().sort({ order: 1 }).toArray(); // Order অনুযায়ী সর্ট হবে
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    app.get('/damage-return', async (req, res) => {
+      const result = await damageReturnCollection.find().toArray();
       res.send(result);
     });
 
-    app.post('/shop', async (req, res) => {
+    app.get('/damage-return/:id', async (req, res) => {
+      const result = await damageReturnCollection.findOne({ _id: new ObjectId(req.params.id) });
+      res.send(result);
+    });
+
+    app.post('/damage-return', async (req, res) => {
       const item = req.body;
-      // নতুন আইটেমকে শেষে রাখার জন্য কাউন্ট চেক করা যেতে পারে
-      const count = await shopCollection.countDocuments();
-      item.order = count;
-      const result = await shopCollection.insertOne(item);
+      item.createdAt = new Date().toISOString();
+      const result = await damageReturnCollection.insertOne(item);
       res.send(result);
     });
 
-    app.delete('/shop/:id', async (req, res) => {
+    app.put('/damage-return/:id', async (req, res) => {
+      const { _id: _ignoreId, ...updatedData } = req.body;
+      const result = await damageReturnCollection.updateOne(
+        { _id: new ObjectId(req.params.id) },
+        { $set: updatedData }
+      );
+      res.send(result);
+    });
+
+    app.delete('/damage-return/:id', async (req, res) => {
+      const result = await damageReturnCollection.deleteOne({ _id: new ObjectId(req.params.id) });
+      res.send(result);
+    });
+
+    // sales damage (standalone damage form) related api
+
+    app.get('/sales-damage', async (req, res) => {
+      const result = await salesDamageCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.get('/sales-damage/:id', async (req, res) => {
+      const result = await salesDamageCollection.findOne({ _id: new ObjectId(req.params.id) });
+      res.send(result);
+    });
+
+    app.post('/sales-damage', async (req, res) => {
+      const { stockAllocations: _ignore, ...item } = req.body;
+      item.createdAt = new Date().toISOString();
+      item.stockAllocations = [];
+      if (!item.customerId) {
+        const plan = await buildDamagePlan(item.items || []);
+        if (!plan.ok) return res.status(400).send({ message: 'স্টকে পণ্য নেই!', shortages: plan.shortages });
+        item.stockAllocations = plan.allocations;
+      }
+      const result = await salesDamageCollection.insertOne(item);
+      res.send(result);
+    });
+
+    app.put('/sales-damage/:id', async (req, res) => {
+      const { _id: _ignoreId, stockAllocations: _ignoreAlloc, ...updatedData } = req.body;
+      updatedData.stockAllocations = [];
+      if (!updatedData.customerId) {
+        const plan = await buildDamagePlan(updatedData.items || [], req.params.id);
+        if (!plan.ok) return res.status(400).send({ message: 'স্টকে পণ্য নেই!', shortages: plan.shortages });
+        updatedData.stockAllocations = plan.allocations;
+      }
+      const result = await salesDamageCollection.updateOne(
+        { _id: new ObjectId(req.params.id) },
+        { $set: updatedData }
+      );
+      res.send(result);
+    });
+
+    app.delete('/sales-damage/:id', async (req, res) => {
+      const result = await salesDamageCollection.deleteOne({ _id: new ObjectId(req.params.id) });
+      res.send(result);
+    });
+
+    // sales bulk related api
+
+    app.get('/sales-bulk-return', async (req, res) => {
+      const result = await salesBulkReturnCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.get('/sales-bulk-return/:id', async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
-      const result = await shopCollection.deleteOne(query);
+      const result = await salesBulkReturnCollection.findOne(query);
       res.send(result);
     });
 
-    // ড্র্যাগ অ্যান্ড ড্রপ পজিশন সেভ করার জন্য রুট
-    app.put('/shop/reorder', async (req, res) => {
-      const updatedList = req.body; // ফ্রন্টএন্ড থেকে আসা নতুন সাজানো লিস্ট
-      try {
-        const operations = updatedList.map((item, index) => ({
-          updateOne: {
-            filter: { _id: new ObjectId(item._id) },
-            update: { $set: { order: index } },
+    app.post('/sales-bulk-return', async (req, res) => {
+      const { stockAllocations: _ignore, ...item } = req.body;
+      item.createdAt = new Date().toISOString();
+      const plan = await buildSalesBulkReturnPlan(item.items || []);
+      item.stockAllocations = plan.allocations;
+      const result = await salesBulkReturnCollection.insertOne(item);
+      res.send(result);
+    });
+
+    app.post('/sales-bulk-return-resync', async (req, res) => {
+      const all = await salesBulkReturnCollection.find().toArray();
+      for (const r of all) {
+        const plan = await buildSalesBulkReturnPlan(r.items || [], r._id);
+        await salesBulkReturnCollection.updateOne({ _id: r._id }, { $set: { stockAllocations: plan.allocations } });
+      }
+      res.send({ ok: true, count: all.length });
+    });
+
+    app.put('/sales-bulk-return/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const { _id: _ignoreId, stockAllocations: _ignoreAlloc, ...updatedData } = req.body;
+      const plan = await buildSalesBulkReturnPlan(updatedData.items || [], id);
+      updatedData.stockAllocations = plan.allocations;
+      const result = await salesBulkReturnCollection.updateOne(query, { $set: updatedData });
+      res.send(result);
+    });
+
+    app.delete('/sales-bulk-return/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await salesBulkReturnCollection.deleteOne(query);
+      res.send(result);
+    });
+
+
+    // ===== Sales bulk return (customer return) => stock PLUS =====
+    const applySalesBulkReturnsToUsed = async (used, excludeBulkId = null) => {
+      const list = await salesBulkReturnCollection.find({ 'stockAllocations.0': { $exists: true } }).toArray();
+      list.forEach((r) => {
+        if (excludeBulkId && String(r._id) === String(excludeBulkId)) return;
+        (r.stockAllocations || []).forEach((a) => {
+          const k = String(a.batchId);
+          const cur = used.get(k) || { paid: 0, free: 0 };
+          cur[a.pool === 'paid' ? 'paid' : 'free'] -= toNum(a.qty); // used theke minus = stock plus
+          used.set(k, cur);
+        });
+      });
+    };
+
+    // Return qty ke notun batch theke shuru kore (jekhane sold ache sekhane) ferot dey
+    const buildSalesBulkReturnPlan = async (items = [], excludeId = null) => {
+      const pools = await loadStockPools({ excludeSalesBulkId: excludeId });
+      const need = new Map();
+      items.forEach((it) => {
+        const k = String(it.productId);
+        if (!need.has(k)) need.set(k, { name: it.productName, paid: 0, free: 0 });
+        const n = need.get(k);
+        n.paid += toNum(it.totalQty);
+        n.free += toNum(it.freeQty);
+      });
+
+      const allocations = [];
+      for (const [pid, n] of need) {
+        let list = pools.filter((x) => String(x.b.productId) === pid);
+        if (!list.length) list = pools.filter((x) => x.b.productName === n.name);
+        list = list.slice().reverse(); // notun batch age
+        if (!list.length) continue;
+
+        const push = (x, pool, qty) =>
+          allocations.push({
+            batchId: String(x.b._id),
+            batchNo: x.b.batchNo,
+            invoiceNo: x.b.invoiceNo,
+            productId: pid,
+            pool,
+            qty,
+          });
+
+        for (const [pool, want] of [['paid', n.paid], ['free', n.free]]) {
+          let remaining = want;
+          const capKey = pool === 'paid' ? 'paidCap' : 'freeCap';
+          for (const x of list) {
+            if (remaining <= 0) break;
+            const t = Math.min(x[capKey], remaining);
+            if (t <= 0) continue;
+            x[capKey] -= t;
+            push(x, pool, t);
+            remaining -= t;
           }
-        }));
-        await shopCollection.bulkWrite(operations);
-        res.send({ success: true, message: "পজিশন আপডেট হয়েছে" });
-      } catch (error) {
-        res.status(500).send({ message: "Reorder failed", error });
-      }
-    });
-
-
-
-    // PRODUCT RELATED API 
-
-
-    // ১. সব প্রোডাক্ট পাওয়া (সর্টেড বাই অর্ডার)
-    app.get('/products', async (req, res) => {
-      try {
-        const data = await productsCollection.find().sort({ order: 1 }).toArray();
-        res.send(data);
-      } catch (err) {
-        console.error(err);
-        res.status(500).send({ message: "Error fetching products", error: err.message });
-      }
-    });
-
-    // ২. ড্র্যাগ অ্যান্ড ড্রপ র‍্যাঙ্কিং সেভ করা (Bulk Update)
-    // আইডি রাউটের উপরে রাখা হয়েছে যাতে 'reorder' শব্দটিকে সার্ভার আইডি মনে না করে
-    app.put('/products/reorder', async (req, res) => {
-      try {
-        const items = req.body;
-        const operations = items.map((item, index) => ({
-          updateOne: {
-            filter: { _id: new ObjectId(item._id) },
-            update: { $set: { order: index } },
+          if (remaining > 0) {
+            const target = pool === 'paid' ? list.find((x) => !x.b.isFreeProduct) : list[0];
+            if (target) push(target, pool, remaining);
+            else push(list[0], 'free', remaining);
           }
-        }));
-
-        const result = await productsCollection.bulkWrite(operations);
-        res.send({ success: true, message: "Order Updated Successfully", result });
-      } catch (err) {
-        res.status(500).send({ message: "Reorder failed", error: err.message });
+        }
       }
-    });
+      return { ok: true, allocations };
+    };
 
-    // ৩. নতুন প্রোডাক্ট যোগ করা (৫টি ফিল্ড: shop, name, costPrice, sellingPrice, unit)
-    app.post('/products', async (req, res) => {
-      try {
-        const { name, costPrice, sellingPrice, unit, shop } = req.body;
-        const count = await productsCollection.countDocuments();
+    // ===== Bulk return stock helpers =====
+    // ===== Damage (customer chhara) => stock MINUS =====
+    const applyDamageToUsed = async (used, excludeDamageId = null) => {
+      const list = await salesDamageCollection.find({ 'stockAllocations.0': { $exists: true } }).toArray();
+      list.forEach((r) => {
+        if (excludeDamageId && String(r._id) === String(excludeDamageId)) return;
+        (r.stockAllocations || []).forEach((a) => {
+          const k = String(a.batchId);
+          const cur = used.get(k) || { paid: 0, free: 0 };
+          cur[a.pool === 'paid' ? 'paid' : 'free'] += toNum(a.qty);
+          used.set(k, cur);
+        });
+      });
+    };
 
-        const newProduct = {
-          name,
-          costPrice: parseFloat(costPrice) || 0,
-          sellingPrice: parseFloat(sellingPrice) || 0,
-          unit,
-          shop,
-          order: count
+    const buildDamagePlan = async (items = [], excludeDamageId = null) => {
+      const pools = await loadStockPools({ excludeDamageId });
+      const need = new Map();
+      items.forEach((it) => {
+        const k = String(it.productId);
+        if (!need.has(k)) need.set(k, { name: it.productName, paid: 0, free: 0 });
+        const n = need.get(k);
+        n.paid += toNum(it.totalQty);
+        n.free += toNum(it.freeQty);
+      });
+
+      const shortages = [];
+      const allocations = [];
+
+      for (const [pid, n] of need) {
+        let list = pools.filter((x) => String(x.b.productId) === pid);
+        if (!list.length) list = pools.filter((x) => x.b.productName === n.name);
+        const totalPaid = list.reduce((s, x) => s + x.paid, 0);
+        const totalFree = list.reduce((s, x) => s + x.free, 0);
+
+        let short = false;
+        if (totalPaid < n.paid) {
+          shortages.push({ productName: `${n.name} (Main)`, need: n.paid, available: totalPaid });
+          short = true;
+        }
+        if (totalFree < n.free) {
+          shortages.push({ productName: `${n.name} (Free)`, need: n.free, available: totalFree });
+          short = true;
+        }
+        if (short) continue;
+
+        for (const [poolKey, want] of [['paid', n.paid], ['free', n.free]]) {
+          let remaining = want;
+          for (const x of list) {
+            if (remaining <= 0) break;
+            const t = Math.min(x[poolKey], remaining);
+            if (t <= 0) continue;
+            x[poolKey] -= t;
+            allocations.push({
+              batchId: String(x.b._id),
+              batchNo: x.b.batchNo,
+              invoiceNo: x.b.invoiceNo,
+              productId: pid,
+              pool: poolKey,
+              qty: t,
+            });
+            remaining -= t;
+          }
+        }
+      }
+      return { ok: shortages.length === 0, shortages, allocations };
+    };
+
+    const loadStockPools = async ({ excludeBulkId = null, excludeSalesBulkId = null, excludeDamageId = null } = {}) => {
+      const batches = await stockPurchaseCollection.find().toArray();
+      batches.sort((a, b) => {
+        const diff = batchTime(a) - batchTime(b);
+        if (diff !== 0) return diff;
+        return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      });
+
+      const purchaseIds = [...new Set(batches.map((b) => b.purchaseId).filter(Boolean))]
+        .map((i) => { try { return new ObjectId(i); } catch (e) { return null; } })
+        .filter(Boolean);
+      const purchases = purchaseIds.length
+        ? await purchaseCollection.find({ _id: { $in: purchaseIds } }).toArray()
+        : [];
+      const pMap = new Map(purchases.map((p) => [String(p._id), p]));
+
+      const poolOf = (a) => a.pool || ((a.kind || 'main') === 'main' ? 'paid' : 'free');
+      const used = new Map();
+      const addUsed = (batchId, pool, qty) => {
+        const k = String(batchId);
+        const cur = used.get(k) || { paid: 0, free: 0 };
+        cur[pool] += qty;
+        used.set(k, cur);
+      };
+
+      const usedSales = await salesCollection.find({ 'stockAllocations.0': { $exists: true } }).toArray();
+      usedSales.forEach((s) => {
+        (s.stockAllocations || []).forEach((a) => {
+          addUsed(a.batchId, poolOf(a), Math.max(toNum(a.qty) - toNum(a.returned), 0));
+        });
+      });
+
+      const usedBulk = await purchaseBulkReturnCollection.find({ 'stockAllocations.0': { $exists: true } }).toArray();
+      usedBulk.forEach((r) => {
+        if (excludeBulkId && String(r._id) === String(excludeBulkId)) return;
+        (r.stockAllocations || []).forEach((a) => addUsed(a.batchId, a.pool === 'paid' ? 'paid' : 'free', toNum(a.qty)));
+      });
+
+      await applySalesBulkReturnsToUsed(used, excludeSalesBulkId);
+      await applyDamageToUsed(used, excludeDamageId);
+
+      return batches.map((b) => {
+        const ret = getBatchReturnedSplit(b, pMap.get(String(b.purchaseId)));
+        const u = used.get(String(b._id)) || { paid: 0, free: 0 };
+        if (b.isFreeProduct) {
+          const free = Math.max(toNum(b.freeQty) - ret.free - (u.paid + u.free), 0);
+          return { b, paid: 0, free, paidCap: 0, freeCap: Math.max(toNum(b.freeQty) - ret.free - free, 0) };
+        }
+        const paid = Math.max(toNum(b.paidQty) - ret.paid - u.paid, 0);
+        const free = Math.max(toNum(b.freeQty) - ret.free - u.free, 0);
+        return {
+          b,
+          paid,
+          free,
+          paidCap: Math.max(toNum(b.paidQty) - ret.paid - paid, 0),
+          freeCap: Math.max(toNum(b.freeQty) - ret.free - free, 0),
         };
+      });
+    };
 
-        const result = await productsCollection.insertOne(newProduct);
-        res.status(201).send(result);
+    const buildBulkReturnPlan = async (items = [], excludeBulkId = null) => {
+      const pools = await loadStockPools({ excludeBulkId });
+      const need = new Map();
+      items.forEach((it) => {
+        const k = String(it.productId);
+        if (!need.has(k)) need.set(k, { name: it.productName, paid: 0, free: 0 });
+        const n = need.get(k);
+        n.paid += toNum(it.totalPcs);
+        n.free += toNum(it.freeTotalQty);
+      });
+
+      const shortages = [];
+      const allocations = [];
+
+      for (const [pid, n] of need) {
+        let list = pools.filter((x) => String(x.b.productId) === pid);
+        if (!list.length) list = pools.filter((x) => x.b.productName === n.name);
+        const totalPaid = list.reduce((s, x) => s + x.paid, 0);
+        const totalFree = list.reduce((s, x) => s + x.free, 0);
+
+        let short = false;
+        if (totalPaid < n.paid) {
+          shortages.push({ productName: `${n.name} (Main)`, need: n.paid, available: totalPaid });
+          short = true;
+        }
+        if (totalFree < n.free) {
+          shortages.push({ productName: `${n.name} (Free)`, need: n.free, available: totalFree });
+          short = true;
+        }
+        if (short) continue;
+
+        for (const [poolKey, want] of [['paid', n.paid], ['free', n.free]]) {
+          let remaining = want;
+          for (const x of list) {
+            if (remaining <= 0) break;
+            const t = Math.min(x[poolKey], remaining);
+            if (t <= 0) continue;
+            x[poolKey] -= t;
+            allocations.push({
+              batchId: String(x.b._id),
+              batchNo: x.b.batchNo,
+              invoiceNo: x.b.invoiceNo,
+              productId: pid,
+              pool: poolKey,
+              qty: t,
+            });
+            remaining -= t;
+          }
+        }
+      }
+      return { ok: shortages.length === 0, shortages, allocations };
+    };
+
+    // purchase bulk return related api
+
+    app.get('/bulk-return-stock', async (req, res) => {
+      try {
+        const pools = await loadStockPools({
+          excludeBulkId: req.query.excludeId || null,
+          excludeDamageId: req.query.excludeDamageId || null,
+        });
+        const map = {};
+        pools.forEach((x) => {
+          const k = String(x.b.productId);
+          if (!map[k]) map[k] = { paid: 0, free: 0 };
+          map[k].paid += x.paid;
+          map[k].free += x.free;
+          const nk = `name:${x.b.productName}`;
+          if (!map[nk]) map[nk] = { paid: 0, free: 0 };
+          map[nk].paid += x.paid;
+          map[nk].free += x.free;
+        });
+        res.send(map);
       } catch (err) {
-        res.status(400).send({ message: "Failed to add product", error: err.message });
+        res.status(500).send({ message: 'Stock load failed' });
       }
     });
 
-    // ৪. প্রোডাক্ট আপডেট করা
-    app.put('/product/:id', async (req, res) => {
+    app.get('/purchase-bulk-return', async (req, res) => {
+      const result = await purchaseBulkReturnCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.post('/purchase-bulk-return', async (req, res) => {
+      const { stockAllocations: _ignore, ...item } = req.body;
+      const plan = await buildBulkReturnPlan(item.items || []);
+      if (!plan.ok) return res.status(400).send({ message: 'স্টকে পণ্য নেই!', shortages: plan.shortages });
+      item.stockAllocations = plan.allocations;
+      const result = await purchaseBulkReturnCollection.insertOne(item);
+      res.send(result);
+    });
+
+    app.get('/purchase-bulk-return/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await purchaseBulkReturnCollection.findOne(query);
+      res.send(result);
+    });
+
+    app.put('/purchase-bulk-return/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const { _id: _ignoreId, stockAllocations: _ignoreAlloc, ...updatedData } = req.body;
+      const plan = await buildBulkReturnPlan(updatedData.items || [], id);
+      if (!plan.ok) return res.status(400).send({ message: 'স্টকে পণ্য নেই!', shortages: plan.shortages });
+      updatedData.stockAllocations = plan.allocations;
+      const result = await purchaseBulkReturnCollection.updateOne(query, { $set: updatedData });
+      res.send(result);
+    });
+
+    app.delete('/purchase-bulk-return/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await purchaseBulkReturnCollection.deleteOne(query);
+      res.send(result);
+    });
+
+    // purchase related api
+
+    // return entry te exact time (createdAt) boshiye dey, age thakle sheta e rakhe
+    const stampReturns = (newList = [], oldList = []) => {
+      const oldMap = new Map((oldList || []).map((r) => [String(r.returnId), r]));
+      return (newList || []).map((r) => {
+        if (r.createdAt) return r;
+        const old = oldMap.get(String(r.returnId));
+        return { ...r, createdAt: old?.createdAt || new Date().toISOString() };
+      });
+    };
+
+    // stock-purchase related api
+    app.get('/stock-purchase', async (req, res) => {
+      const result = await stockPurchaseCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.get('/stock-purchase/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await stockPurchaseCollection.findOne(query);
+      res.send(result);
+    });
+
+    // batch er sell price update (shudhu sellPrice)
+    app.patch('/stock-purchase/:id/sell-price', async (req, res) => {
       try {
         const id = req.params.id;
-        const data = { ...req.body };
-        delete data._id;
-
-        const parentFields = ['parentUnit', 'parentQty', 'subUnit', 'subUnitQty', 'freeProductParentUnitQty', 'freeProductSubQty'];
-        const normalFields = ['unit', 'freeProductUnitQty'];
-
-        const unsetDoc = {};
-        if (data.parentUnitUse === true) {
-          normalFields.forEach(f => { unsetDoc[f] = ""; });
-        } else {
-          parentFields.forEach(f => { unsetDoc[f] = ""; });
+        const price = Number(req.body.sellPrice);
+        if (isNaN(price) || price < 0) {
+          return res.status(400).send({ message: 'Invalid sell price' });
         }
+        const rounded = Math.round(price * 100) / 100;
+        const batch = await stockPurchaseCollection.findOne({ _id: new ObjectId(id) });
+        if (!batch) return res.status(404).send({ message: 'Batch not found' });
 
-        const result = await productCollection.updateOne(
+        const result = await stockPurchaseCollection.updateOne(
           { _id: new ObjectId(id) },
-          { $set: data, $unset: unsetDoc }
+          { $set: { sellPrice: rounded } }
         );
+
+        // Purchase er item er sellPrice o update, jate purchase edit korle ei price ashe
+        if (batch.purchaseId) {
+          if (batch.isFreeProduct) {
+            await purchaseCollection.updateOne(
+              { _id: new ObjectId(batch.purchaseId), 'freeItems.productId': batch.productId },
+              { $set: { 'freeItems.$.sellPricePcs': rounded } }
+            );
+          } else {
+            await purchaseCollection.updateOne(
+              { _id: new ObjectId(batch.purchaseId), 'items.productId': batch.productId },
+              { $set: { 'items.$.sellPrice': rounded } }
+            );
+          }
+        }
         res.send(result);
       } catch (err) {
-        res.status(400).send({ message: "Update failed", error: err.message });
-      }
-    });
-
-    // ৫. প্রোডাক্ট ডিলিট করা
-    app.delete('/products/:id', async (req, res) => {
-      try {
-        const id = req.params.id;
-        const query = { _id: new ObjectId(id) };
-        const result = await productsCollection.deleteOne(query);
-        res.send(result);
-      } catch (err) {
-        res.status(500).send({ message: "Delete failed", error: err.message });
+        res.status(500).send({ message: 'Update failed' });
       }
     });
 
 
 
-
-    //  ITEM RELATED API 
-
-    // ১. সকল আইটেম বা ইনভয়েস পাওয়ার জন্য
-
-    app.get('/item', async (req, res) => {
-      try {
-        const result = await itemCollection.find().sort({ _id: -1 }).toArray(); // নতুন ইনভয়েস আগে দেখাবে
-        res.send(result);
-      } catch (error) {
-        res.status(500).send({ message: "Error fetching items" });
-      }
+    app.get('/purchase', async (req, res) => {
+      const result = await purchaseCollection.find().toArray();
+      res.send(result);
     });
 
-    // ২. নির্দিষ্ট একটি আইডি দিয়ে ডাটা খুঁজে বের করার জন্য (এডিট করার সময় এটি লাগবে)
-    app.get('/item/:id', async (req, res) => {
-      try {
-        const id = req.params.id;
-        const query = { _id: new ObjectId(id) };
-        const result = await itemCollection.findOne(query);
-        if (!result) {
-          return res.status(404).send({ message: "Item not found" });
+    app.get('/purchase/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await purchaseCollection.findOne(query);
+      res.send(result);
+    });
+
+    app.post('/purchase', async (req, res) => {
+      const item = req.body;
+      const result = await purchaseCollection.insertOne(item);
+      res.send(result);
+    });
+
+    app.delete('/purchase/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await purchaseCollection.deleteOne(query);
+
+      // purchase delete hole tar stock-purchase batch gulo o delete hobe
+      await stockPurchaseCollection.deleteMany({ purchaseId: id });
+      await purchaseBulkReturnCollection.deleteMany({ purchaseId: id });
+      res.send(result);
+    });
+
+    app.put('/purchase/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const { unsetFields, returnOnly, stockCreated: _ignoreStockCreated, _id: _ignoreId, ...updatedData } = req.body;
+
+      const updateDoc = {
+        $set: updatedData,
+      };
+
+      if (Array.isArray(unsetFields) && unsetFields.length > 0) {
+        updateDoc.$unset = {};
+        unsetFields.forEach((field) => {
+          updateDoc.$unset[field] = "";
+        });
+      }
+
+      // Already Received purchase edit hole purana batch muche notun kore banano hobe
+      const oldPurchase = await purchaseCollection.findOne(query);
+      if (Array.isArray(updatedData.returnHistory)) {
+        updatedData.returnHistory = stampReturns(updatedData.returnHistory, oldPurchase?.returnHistory);
+      }
+      const wasReceived = oldPurchase?.receiveStatus === 'Received' || oldPurchase?.receiveStatus === 'Yes';
+      if (wasReceived && updatedData.receiveStatus === 'Received' && !Array.isArray(updatedData.returnHistory) && returnOnly !== true) {
+        await stockPurchaseCollection.deleteMany({ purchaseId: id });
+        await purchaseCollection.updateOne(query, { $unset: { stockCreated: "" } });
+      }
+
+      const result = await purchaseCollection.updateOne(query, updateDoc);
+
+
+      // Receive hole purchase theke stock-purchase a batch toiri hobe (purchase thakbei)
+      if (updatedData.receiveStatus === 'Received') {
+        // atomic lock: ek shathe 2ta request ashleo shudhu ekta e pass korbe
+        const claim = await purchaseCollection.updateOne(
+          { _id: new ObjectId(id), stockCreated: { $ne: true } },
+          { $set: { stockCreated: true } }
+        );
+        const alreadyInStock = await stockPurchaseCollection.findOne({ purchaseId: id });
+
+        if (claim.modifiedCount === 1 && !alreadyInStock) {
+          const purchase = await purchaseCollection.findOne(query);
+
+          if (purchase) {
+            const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+            const round4 = (n) => Math.round((Number(n) || 0) * 10000) / 10000;
+
+            const items = purchase.items || [];
+            const freeItems = purchase.freeItems || [];
+            const itemsSubtotalSum = items.reduce((s, it) => s + (Number(it.subtotal) || 0), 0);
+            const payable = Number(purchase.payableAmount) || 0;
+
+            // Common info (protita batch a thakbe)
+            const common = {
+              purchaseId: id,
+              invoiceNo: purchase.invoiceNo,
+              company: purchase.company,
+              purchaseDate: purchase.purchaseDate,
+              receiveDate: purchase.receiveDate,
+              createdAt: new Date(),
+            };
+
+            // Main product batch
+            const mainBatches = items.map((it, idx) => {
+              const paidQty = Number(it.totalPcs) || 0;
+              const freeQty = Number(it.freeTotalQty) || 0;
+              const stockQty = paidQty + freeQty;
+              const buyPrice = Number(it.buyPrice) || 0;
+              const grossAmount = round2(buyPrice * paidQty);
+              const itemSubtotal = Number(it.subtotal) || 0;
+              const itemDiscount = round2(grossAmount - itemSubtotal);
+
+              // Overall discount + adjustment, subtotal onujayi bhag kore nilam
+              const netCost = itemsSubtotalSum > 0
+                ? round2((payable * itemSubtotal) / itemsSubtotalSum)
+                : 0;
+
+              return {
+                ...common,
+                batchNo: `${purchase.invoiceNo}-${idx + 1}`,
+                isFreeProduct: false,
+                parentMode: it.parentMode === true,
+                subUnit: it.subUnit || '',
+                pcsPerUnit: Number(it.pcsPerUnit) || 1,
+                pcsPerSub: Number(it.pcsPerSub) || 0,
+                subQty: Number(it.subQty) || 0,
+                freeSubQty: Number(it.freeSubQty) || 0,
+                productId: it.productId,
+                productName: it.productName,
+                unit: it.unit,
+                unitQty: Number(it.unitQty) || 0,
+                pcsQty: Number(it.pcsQty) || 0,
+                buyPrice,                       // list buy price (per pcs)
+                sellPrice: Number(it.sellPrice) || 0, // sell price (per pcs)
+                grossAmount,                    // discount er age
+                itemDiscount,                   // product wise discount
+                netCost,                        // sob discount/adjustment er por total kotho porse
+                paidQty,                        // kena qty
+                freeQty,                        // free pawa qty
+                freeUnitQty: Number(it.freeUnitQty) || 0,
+                freePcsQty: Number(it.freePcsQty) || 0,
+                stockQty,                       // ei batch a mot qty
+                availableQty: stockQty,         // ekhon stock a koto ase
+                costPerPcs: paidQty > 0 ? round4(netCost / paidQty) : 0, // per pcs cost (free qty hisabe dhora hoy na)
+              };
+            });
+
+            // Others Free product batch (cost 0)
+            const freeBatches = freeItems.map((it, idx) => {
+              const qty = Number(it.totalQty) || 0;
+              return {
+                ...common,
+                batchNo: `${purchase.invoiceNo}-F${idx + 1}`,
+                isFreeProduct: true,
+                parentMode: it.parentMode === true,
+                subUnit: it.subUnit || '',
+                pcsPerUnit: Number(it.pcsPerUnit) || 1,
+                pcsPerSub: Number(it.pcsPerSub) || 0,
+                subQty: Number(it.subQty) || 0,
+                productId: it.productId,
+                productName: it.productName,
+                unit: it.unit,
+                unitQty: Number(it.unitQty) || 0,
+                pcsQty: Number(it.pcsQty) || 0,
+                buyPrice: 0,
+                sellPrice: Number(it.sellPricePcs) || 0,
+                grossAmount: 0,
+                itemDiscount: 0,
+                netCost: 0,
+                paidQty: 0,
+                freeQty: qty,
+                stockQty: qty,
+                availableQty: qty,
+                costPerPcs: 0,
+              };
+            });
+
+            const allBatches = [...mainBatches, ...freeBatches];
+            if (allBatches.length > 0) {
+              await stockPurchaseCollection.insertMany(allBatches);
+            }
+          }
         }
-        res.send(result);
-      } catch (error) {
-        res.status(500).send({ message: "Error fetching specific item" });
       }
-    });
 
-    // ৩. নতুন ইনভয়েস সেভ করার জন্য
-    app.post('/item', async (req, res) => {
-      try {
-        const invoiceData = req.body;
-        if (invoiceData._id) delete invoiceData._id; // আইডি থাকলে ডিলিট করে নতুন আইডি তৈরি হতে দেবে
-
-        const result = await itemCollection.insertOne(invoiceData);
-        res.send(result);
-      } catch (error) {
-        res.status(500).send({ message: "Error saving item" });
-      }
-    });
-
-    // ৪. ইনভয়েস ডিলিট করার জন্য (Trash-এ সেভ হয়ে তারপর ডিলিট হবে)
-    app.delete('/item/:id', async (req, res) => {
-      try {
-        const id = req.params.id;
-        const query = { _id: new ObjectId(id) };
-
-        // ডিলিট করার আগে ডাটা খুঁজে বের করা
-        const itemToDelete = await itemCollection.findOne(query);
-
-        if (itemToDelete) {
-          // Trash কালেকশনে ডাটা সেভ করা
-          await trashCollection.insertOne(itemToDelete);
-        }
-
-        // মূল কালেকশন থেকে ডিলিট করা
-        const result = await itemCollection.deleteOne(query);
-        res.send(result);
-      } catch (error) {
-        res.status(500).send({ message: "Error deleting item" });
-      }
-    });
-
-    // ৫. ডাটা আপডেট করার জন্য (Edit Option নিখুঁতভাবে কাজ করার জন্য)
-    app.put('/item/:id', async (req, res) => {
-      try {
-        const id = req.params.id;
-        const updatedData = req.body;
-        const filter = { _id: new ObjectId(id) };
-
-        // বডি থেকে _id সরিয়ে নেওয়া হচ্ছে যেন মঙ্গোডিবি আপডেট করতে সমস্যা না করে
-        const { _id, ...dataWithoutId } = updatedData;
-
-        const updateDoc = {
-          $set: dataWithoutId // এটি items অ্যারের ভেতরের showQty সহ সব ডাটা আপডেট করে দেবে
-        };
-
-        const result = await itemCollection.updateOne(filter, updateDoc, { upsert: true });
-        res.send(result);
-      } catch (error) {
-        res.status(500).send({ message: "Error updating data" });
-      }
-    });
-
-    // ৬. একাধিক ইনভয়েস/আইটেম একসাথে ডিলিট করার জন্য (Trash-এ সেভ হয়ে তারপর ডিলিট হবে)
-    app.delete('/items/delete-multiple', async (req, res) => {
-      try {
-        const { ids } = req.body;
-
-        if (!ids || !Array.isArray(ids) || ids.length === 0) {
-          return res.status(400).send({ message: "No IDs provided for deletion" });
-        }
-
-        const objectIds = ids.map(id => new ObjectId(id));
-        const query = { _id: { $in: objectIds } };
-
-        // ডিলিট হতে যাওয়া সব ডাটা আগে বের করা
-        const itemsToDelete = await itemCollection.find(query).toArray();
-
-        if (itemsToDelete.length > 0) {
-          // Trash কালেকশনে সব ডাটা সেভ করা
-          await trashCollection.insertMany(itemsToDelete);
-        }
-
-        // মূল কালেকশন থেকে ডিলিট করা
-        const result = await itemCollection.deleteMany(query);
-
-        res.send(result);
-      } catch (error) {
-        res.status(500).send({ message: "Error deleting multiple items" });
-      }
-    });
-
-    // ৭. ট্র্যাশ থেকে সকল ডিলিট হওয়া ডাটা পাওয়ার জন্য
-    app.get('/trash', async (req, res) => {
-      try {
-        const result = await trashCollection.find().sort({ _id: -1 }).toArray();
-        res.send(result);
-      } catch (error) {
-        res.status(500).send({ message: "Error fetching trash items" });
-      }
-    });
-
-    // ৮. ট্র্যাশ থেকে একটি আইটেম রিকভার (পুনরুদ্ধার) করার জন্য
-    app.post('/trash/restore/:id', async (req, res) => {
-      try {
-        const id = req.params.id;
-        const query = { _id: new ObjectId(id) };
-        const itemToRestore = await trashCollection.findOne(query);
-
-        if (!itemToRestore) {
-          return res.status(404).send({ message: "Item not found in trash" });
-        }
-
-        await itemCollection.insertOne(itemToRestore);
-        const result = await trashCollection.deleteOne(query);
-        res.send(result);
-      } catch (error) {
-        res.status(500).send({ message: "Error restoring item" });
-      }
-    });
-
-    // ৯. ট্র্যাশ থেকে একাধিক আইটেম একসাথে রিকভার করার জন্য
-    app.post('/trash/restore-multiple', async (req, res) => {
-      try {
-        const { ids } = req.body;
-        if (!ids || !Array.isArray(ids) || ids.length === 0) {
-          return res.status(400).send({ message: "No IDs provided" });
-        }
-
-        const objectIds = ids.map(id => new ObjectId(id));
-        const query = { _id: { $in: objectIds } };
-        const itemsToRestore = await trashCollection.find(query).toArray();
-
-        if (itemsToRestore.length > 0) {
-          await itemCollection.insertMany(itemsToRestore);
-          const result = await trashCollection.deleteMany(query);
-          res.send(result);
+      // Purchase theke return product thakle purchase-bulk-return e sync hobe
+      if (updatedData.receiveStatus === 'Received') {
+        const p = await purchaseCollection.findOne(query);
+        const retItems = (p?.returnItems || []).filter(
+          (it) => toNum(it.totalQty) > 0 || toNum(it.freeQty) > 0
+        );
+        if (retItems.length > 0) {
+          const bulkItems = retItems.map((it) => ({
+            productId: it.productId,
+            productName: it.productName,
+            buyPrice: toNum(it.buyPrice),
+            sellPrice: 0,
+            unit: it.unit,
+            parentMode: it.parentMode === true,
+            subUnit: it.subUnit || '',
+            pcsPerUnit: toNum(it.pcsPerUnit) || 1,
+            pcsPerSub: toNum(it.pcsPerSub),
+            unitQty: toNum(it.unitQty),
+            subQty: toNum(it.subQty),
+            pcsQty: toNum(it.pcsQty),
+            totalPcs: toNum(it.totalQty),
+            freeUnitQty: toNum(it.freeUnitQty),
+            freeSubQty: toNum(it.freeSubQty),
+            freePcsQty: toNum(it.freePcsQty),
+            freeTotalQty: toNum(it.freeQty),
+            subtotal: toNum(it.subtotal),
+          }));
+          const total = Math.round(bulkItems.reduce((s, i) => s + i.subtotal, 0) * 100) / 100;
+          const existingBulk = await purchaseBulkReturnCollection.findOne({ purchaseId: id });
+          const bulkPlan = await buildBulkReturnPlan(bulkItems, existingBulk?._id || null);
+          await purchaseBulkReturnCollection.updateOne(
+            { purchaseId: id },
+            {
+              $set: {
+                fromPurchase: true,
+                purchaseId: id,
+                invoiceNo: p.invoiceNo,
+                company: p.company,
+                phone: p.phone,
+                address: p.address,
+                category: p.category,
+                returnDate: p.receiveDate || p.purchaseDate,
+                items: bulkItems,
+                grandTotal: total,
+                returnAmount: total,
+                note: p.orderNote || '',
+                stockAllocations: bulkPlan.ok ? bulkPlan.allocations : [],
+              },
+              $setOnInsert: { createdAt: new Date().toISOString() },
+            },
+            { upsert: true }
+          );
         } else {
-          res.status(404).send({ message: "No items found to restore" });
+          await purchaseBulkReturnCollection.deleteOne({ purchaseId: id });
         }
-      } catch (error) {
-        res.status(500).send({ message: "Error restoring multiple items" });
       }
+
+      res.send(result);
     });
 
-    // ১১. ট্র্যাশ থেকে একাধিক আইটেম একসাথে পার্মানেন্টলি ডিলিট (ডায়নামিক রুটের উপরে রাখতে হবে)
-    app.delete('/trash/delete-multiple', async (req, res) => {
-      try {
-        const { ids } = req.body;
-        if (!ids || !Array.isArray(ids) || ids.length === 0) {
-          return res.status(400).send({ message: "No IDs provided" });
+
+
+    // ===== Sales stock helpers =====
+    const toNum = (v) => Number(v) || 0;
+
+    // purchase return বাদ দিয়ে batch এর return qty
+    const getBatchReturned = (batch, purchase) => {
+      let ret = 0;
+      (purchase?.returnHistory || []).forEach((r) => {
+        if (batch.isFreeProduct) {
+          (r.freeItems || []).forEach((it) => {
+            if (it.productId === batch.productId) ret += toNum(it.returnTotalQty);
+          });
+        } else {
+          (r.items || []).forEach((it) => {
+            if (it.productId === batch.productId) {
+              ret += toNum(it.returnTotalQty) + toNum(it.returnFreeTotalQty ?? it.returnFreeQty);
+            }
+          });
+        }
+      });
+      return ret;
+    };
+
+    // batch er date (receiveDate -> purchaseDate -> createdAt) theke time ber kora
+    const batchTime = (b) => {
+      const s = String(b.receiveDate || b.purchaseDate || '').split(',')[0].trim();
+      let t = NaN;
+      if (s.includes('/')) {
+        const [d, m, y] = s.split('/').map(Number);
+        t = new Date(y, m - 1, d).getTime();
+      } else if (s) {
+        t = new Date(s).getTime();
+      }
+      return isNaN(t) ? new Date(b.createdAt).getTime() : t;
+    };
+
+    // stock check + FIFO (purane batch age) allocation
+    // purchase return (paid / free alada)
+    const getBatchReturnedSplit = (batch, purchase) => {
+      let paid = 0;
+      let free = 0;
+      (purchase?.returnHistory || []).forEach((r) => {
+        if (batch.isFreeProduct) {
+          (r.freeItems || []).forEach((it) => {
+            if (it.productId === batch.productId) free += toNum(it.returnTotalQty);
+          });
+        } else {
+          (r.items || []).forEach((it) => {
+            if (it.productId === batch.productId) {
+              paid += toNum(it.returnTotalQty);
+              free += toNum(it.returnFreeTotalQty ?? it.returnFreeQty);
+            }
+          });
+        }
+      });
+      return { paid, free };
+    };
+
+    // Main -> shudhu main(paid) stock theke, Free/Others -> shudhu free stock theke (FIFO)
+    const buildStockPlan = async (items = [], freeItems = [], excludeSaleId = null, opts = {}) => {
+      const allowBorrow = opts.allowBorrow === true;
+      const borrowFeatures = await featureCollection
+        .find({ key: { $in: ['mainFromFreeStock', 'freeFromMainStock'] } })
+        .toArray();
+      const allowMainFromFree = borrowFeatures.some((f) => f.key === 'mainFromFreeStock' && f.enabled === true);
+      const allowFreeFromMain = borrowFeatures.some((f) => f.key === 'freeFromMainStock' && f.enabled === true);
+      const need = new Map();
+      const add = (pid, name, main, free, others) => {
+        const total = main + free + others;
+        if (!pid || total <= 0) return;
+        const key = String(pid);
+        if (!need.has(key)) need.set(key, { productName: name, qty: 0, main: 0, free: 0, others: 0 });
+        const n = need.get(key);
+        n.main += main;
+        n.free += free;
+        n.others += others;
+        n.qty += total;
+      };
+      items.forEach((it) => add(it.productId, it.productName, toNum(it.totalPcs), toNum(it.freeQty), 0));
+      freeItems.forEach((it) => add(it.productId, it.productName, 0, 0, toNum(it.totalQty)));
+
+      if (need.size === 0) return { ok: true, shortages: [], borrows: [], allocations: [] };
+
+      const batches = await stockPurchaseCollection
+        .find({
+          $or: [
+            { productId: { $in: [...need.keys()] } },
+            { productName: { $in: [...need.values()].map((n) => n.productName) } },
+          ],
+        })
+        .toArray();
+
+      batches.sort((a, b) => {
+        const diff = batchTime(a) - batchTime(b);
+        if (diff !== 0) return diff;
+        return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      });
+
+      const purchaseIds = [...new Set(batches.map((b) => b.purchaseId).filter(Boolean))]
+        .map((i) => { try { return new ObjectId(i); } catch (e) { return null; } })
+        .filter(Boolean);
+      const purchases = purchaseIds.length
+        ? await purchaseCollection.find({ _id: { $in: purchaseIds } }).toArray()
+        : [];
+      const pMap = new Map(purchases.map((p) => [String(p._id), p]));
+
+      const poolOf = (a) => a.pool || ((a.kind || 'main') === 'main' ? 'paid' : 'free');
+
+      const usedSales = await salesCollection
+        .find({ 'stockAllocations.0': { $exists: true } })
+        .toArray();
+      const used = new Map();
+      usedSales.forEach((s) => {
+        if (excludeSaleId && String(s._id) === String(excludeSaleId)) return;
+        (s.stockAllocations || []).forEach((a) => {
+          const k = String(a.batchId);
+          const cur = used.get(k) || { paid: 0, free: 0 };
+          cur[poolOf(a)] += Math.max(toNum(a.qty) - toNum(a.returned), 0);
+          used.set(k, cur);
+        });
+      });
+
+      const usedBulkRets = await purchaseBulkReturnCollection
+        .find({ 'stockAllocations.0': { $exists: true } })
+        .toArray();
+      usedBulkRets.forEach((r) => {
+        (r.stockAllocations || []).forEach((a) => {
+          const k = String(a.batchId);
+          const cur = used.get(k) || { paid: 0, free: 0 };
+          cur[a.pool === 'paid' ? 'paid' : 'free'] += toNum(a.qty);
+          used.set(k, cur);
+        });
+      });
+      await applySalesBulkReturnsToUsed(used);
+      await applyDamageToUsed(used);
+
+      const pools = batches.map((b) => {
+        const ret = getBatchReturnedSplit(b, pMap.get(String(b.purchaseId)));
+        const u = used.get(String(b._id)) || { paid: 0, free: 0 };
+        if (b.isFreeProduct) {
+          return { b, paid: 0, free: Math.max(toNum(b.freeQty) - ret.free - (u.paid + u.free), 0) };
+        }
+        return {
+          b,
+          paid: Math.max(toNum(b.paidQty) - ret.paid - u.paid, 0),
+          free: Math.max(toNum(b.freeQty) - ret.free - u.free, 0),
+        };
+      });
+
+      const shortages = [];
+      const borrows = [];
+      const allocations = [];
+
+      const takeFrom = (list, poolKey, kind, pid, want) => {
+        let remaining = want;
+        for (const x of list) {
+          if (remaining <= 0) break;
+          const t = Math.min(x[poolKey], remaining);
+          if (t <= 0) continue;
+          x[poolKey] -= t;
+          allocations.push({
+            batchId: String(x.b._id),
+            batchNo: x.b.batchNo,
+            productId: pid,
+            kind,
+            pool: poolKey,
+            qty: t,
+            returned: 0,
+          });
+          remaining -= t;
+        }
+        return remaining;
+      };
+
+      for (const [pid, n] of need) {
+        const list = pools.filter(
+          (x) => String(x.b.productId) === pid || x.b.productName === n.productName
+        );
+        const totalPaid = list.reduce((s, x) => s + x.paid, 0);
+        const totalFree = list.reduce((s, x) => s + x.free, 0);
+
+        const needMain = n.main;
+        const needFree = n.free + n.others;
+        const mainShort = Math.max(needMain - totalPaid, 0);
+        const freeShort = Math.max(needFree - totalFree, 0);
+        const surplusPaid = Math.max(totalPaid - needMain, 0);
+        const surplusFree = Math.max(totalFree - needFree, 0);
+
+        let mainFromFree = 0;
+        let freeFromMain = 0;
+        let hardShort = false;
+
+        if (mainShort > 0) {
+          if (allowMainFromFree && surplusFree >= mainShort) mainFromFree = mainShort;
+          else {
+            shortages.push({ productName: `${n.productName} (Main)`, need: needMain, available: totalPaid });
+            hardShort = true;
+          }
+        }
+        if (freeShort > 0) {
+          if (allowFreeFromMain && surplusPaid >= freeShort) freeFromMain = freeShort;
+          else {
+            shortages.push({ productName: `${n.productName} (Free)`, need: needFree, available: totalFree });
+            hardShort = true;
+          }
+        }
+        if (hardShort) continue;
+
+        if ((mainFromFree > 0 || freeFromMain > 0) && !allowBorrow) {
+          borrows.push(
+            mainFromFree > 0
+              ? { productName: n.productName, direction: 'free_to_main', need: needMain, have: totalPaid, borrowQty: mainFromFree, otherAvailable: totalFree, otherNeed: needFree }
+              : { productName: n.productName, direction: 'main_to_free', need: needFree, have: totalFree, borrowQty: freeFromMain, otherAvailable: totalPaid, otherNeed: needMain }
+          );
+          continue;
         }
 
-        const objectIds = ids.map(id => new ObjectId(id));
-        const query = { _id: { $in: objectIds } };
-        const result = await trashCollection.deleteMany(query);
-        res.send(result);
-      } catch (error) {
-        console.error("Bulk delete error:", error);
-        res.status(500).send({ message: "Error deleting multiple items" });
+        takeFrom(list, 'paid', 'main', pid, needMain - mainFromFree);
+        const ownFreeTotal = needFree - freeFromMain;
+        const ownFree = Math.min(n.free, ownFreeTotal);
+        const ownOthers = ownFreeTotal - ownFree;
+        takeFrom(list, 'free', 'free', pid, ownFree);
+        takeFrom(list, 'free', 'others', pid, ownOthers);
+
+        if (mainFromFree > 0) takeFrom(list, 'free', 'main', pid, mainFromFree);
+        if (freeFromMain > 0) {
+          takeFrom(list, 'paid', 'free', pid, n.free - ownFree);
+          takeFrom(list, 'paid', 'others', pid, n.others - ownOthers);
+        }
       }
+
+      return { ok: shortages.length === 0 && borrows.length === 0, shortages, borrows, allocations };
+    };
+
+    // (purano buildStockPlan, ar use hocche na)
+    const buildStockPlanUnused = async (items = [], freeItems = [], excludeSaleId = null) => {
+      const need = new Map();
+      const add = (pid, name, main, free, others) => {
+        const total = main + free + others;
+        if (!pid || total <= 0) return;
+        const key = String(pid);
+        if (!need.has(key)) need.set(key, { productName: name, qty: 0, main: 0, free: 0, others: 0 });
+        const n = need.get(key);
+        n.main += main;
+        n.free += free;
+        n.others += others;
+        n.qty += total;
+      };
+      items.forEach((it) => add(it.productId, it.productName, toNum(it.totalPcs), toNum(it.freeQty), 0));
+      freeItems.forEach((it) => add(it.productId, it.productName, 0, 0, toNum(it.totalQty)));
+
+      if (need.size === 0) return { ok: true, shortages: [], allocations: [] };
+
+      const batches = await stockPurchaseCollection
+        .find({
+          $or: [
+            { productId: { $in: [...need.keys()] } },
+            { productName: { $in: [...need.values()].map((n) => n.productName) } },
+          ],
+        })
+        .toArray();
+
+      batches.sort((a, b) => {
+        const diff = batchTime(a) - batchTime(b);
+        if (diff !== 0) return diff;
+        return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      });
+
+      const purchaseIds = [...new Set(batches.map((b) => b.purchaseId).filter(Boolean))]
+        .map((i) => { try { return new ObjectId(i); } catch (e) { return null; } })
+        .filter(Boolean);
+      const purchases = purchaseIds.length
+        ? await purchaseCollection.find({ _id: { $in: purchaseIds } }).toArray()
+        : [];
+      const pMap = new Map(purchases.map((p) => [String(p._id), p]));
+
+      // ager sales theke batch wise main/free/others koto gese
+      const usedSales = await salesCollection
+        .find({ 'stockAllocations.0': { $exists: true } })
+        .toArray();
+      const used = new Map();
+      usedSales.forEach((s) => {
+        if (excludeSaleId && String(s._id) === String(excludeSaleId)) return;
+        (s.stockAllocations || []).forEach((a) => {
+          const k = String(a.batchId);
+          const cur = used.get(k) || { main: 0, free: 0, others: 0 };
+          const kind = a.kind || 'main';
+          cur[kind] = (cur[kind] || 0) + Math.max(toNum(a.qty) - toNum(a.returned), 0);
+          used.set(k, cur);
+        });
+      });
+
+      // protita batch er alada paid pool & free pool
+      const pools = batches.map((b) => {
+        const ret = getBatchReturnedSplit(b, pMap.get(String(b.purchaseId)));
+        const u = used.get(String(b._id)) || { main: 0, free: 0, others: 0 };
+        if (b.isFreeProduct) {
+          return {
+            b,
+            paid: 0,
+            free: Math.max(toNum(b.freeQty) - ret.free - (u.main + u.free + u.others), 0),
+          };
+        }
+        return {
+          b,
+          paid: Math.max(toNum(b.paidQty) - ret.paid - u.main, 0),
+          free: Math.max(toNum(b.freeQty) - ret.free - u.free - u.others, 0),
+        };
+      });
+
+      const shortages = [];
+      const allocations = [];
+
+      for (const [pid, n] of need) {
+        const list = pools.filter(
+          (x) => String(x.b.productId) === pid || x.b.productName === n.productName
+        );
+        const totalPaid = list.reduce((s, x) => s + x.paid, 0);
+        const totalFree = list.reduce((s, x) => s + x.free, 0);
+
+        let short = false;
+        if (totalPaid < n.main) {
+          shortages.push({ productName: `${n.productName} (Main)`, need: n.main, available: totalPaid });
+          short = true;
+        }
+        if (totalFree < n.free + n.others) {
+          shortages.push({ productName: `${n.productName} (Free)`, need: n.free + n.others, available: totalFree });
+          short = true;
+        }
+        if (short) continue;
+
+        for (const [kind, want] of [['main', n.main], ['free', n.free], ['others', n.others]]) {
+          let remaining = want;
+          const poolKey = kind === 'main' ? 'paid' : 'free';
+          for (const x of list) {
+            if (remaining <= 0) break;
+            const take = Math.min(x[poolKey], remaining);
+            if (take <= 0) continue;
+            x[poolKey] -= take;
+            allocations.push({ batchId: String(x.b._id), batchNo: x.b.batchNo, productId: pid, kind, qty: take, returned: 0 });
+            remaining -= take;
+          }
+        }
+      }
+
+      return { ok: shortages.length === 0, shortages, allocations };
+    };
+
+    // (purano version, ar use hocche na)
+    const buildStockPlanOld = async (items = [], freeItems = []) => {
+      const need = new Map();
+      const add = (pid, name, main, free, others) => {
+        const total = main + free + others;
+        if (!pid || total <= 0) return;
+        const key = String(pid);
+        if (!need.has(key)) need.set(key, { productName: name, qty: 0, main: 0, free: 0, others: 0 });
+        const n = need.get(key);
+        n.main += main;
+        n.free += free;
+        n.others += others;
+        n.qty += total;
+      };
+      items.forEach((it) => add(it.productId, it.productName, toNum(it.totalPcs), toNum(it.freeQty), 0));
+      freeItems.forEach((it) => add(it.productId, it.productName, 0, 0, toNum(it.totalQty)));
+
+      if (need.size === 0) return { ok: true, shortages: [], allocations: [] };
+
+      const batches = await stockPurchaseCollection
+        .find({
+          $or: [
+            { productId: { $in: [...need.keys()] } },
+            { productName: { $in: [...need.values()].map((n) => n.productName) } },
+          ],
+        })
+        .toArray();
+
+      // FIFO: age je purchase/receive hoyeche sheta age use hobe
+      batches.sort((a, b) => {
+        const diff = batchTime(a) - batchTime(b);
+        if (diff !== 0) return diff;
+        return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      });
+
+      const purchaseIds = [...new Set(batches.map((b) => b.purchaseId).filter(Boolean))]
+        .map((i) => { try { return new ObjectId(i); } catch (e) { return null; } })
+        .filter(Boolean);
+      const purchases = purchaseIds.length
+        ? await purchaseCollection.find({ _id: { $in: purchaseIds } }).toArray()
+        : [];
+      const pMap = new Map(purchases.map((p) => [String(p._id), p]));
+
+      const shortages = [];
+      const allocations = [];
+
+      for (const [pid, n] of need) {
+        const list = batches
+          .filter((b) => String(b.productId) === pid || b.productName === n.productName)
+          .map((b) => ({
+            b,
+            avail: Math.max(toNum(b.availableQty) - getBatchReturned(b, pMap.get(String(b.purchaseId))), 0),
+          }));
+        const totalAvail = list.reduce((s, x) => s + x.avail, 0);
+
+        if (totalAvail < n.qty) {
+          shortages.push({ productName: n.productName, need: n.qty, available: totalAvail });
+          continue;
+        }
+
+        for (const [kind, want] of [['main', n.main], ['free', n.free], ['others', n.others]]) {
+          let remaining = want;
+          for (const x of list) {
+            if (remaining <= 0) break;
+            const take = Math.min(x.avail, remaining);
+            if (take <= 0) continue;
+            x.avail -= take;
+            allocations.push({ batchId: String(x.b._id), batchNo: x.b.batchNo, productId: pid, kind, qty: take, returned: 0 });
+            remaining -= take;
+          }
+        }
+      }
+
+      return { ok: shortages.length === 0, shortages, allocations };
+    };
+
+    const applyAllocations = async (allocations = []) => {
+      for (const a of allocations) {
+        await stockPurchaseCollection.updateOne(
+          { _id: new ObjectId(a.batchId) },
+          { $inc: { availableQty: -toNum(a.qty) } }
+        );
+      }
+    };
+
+    // sales return history theke product wise total return qty
+    const sumReturns = (history = []) => {
+      const map = new Map();
+      const add = (pid, kind, qty) => {
+        const k = `${pid}|${kind}`;
+        map.set(k, (map.get(k) || 0) + qty);
+      };
+      (history || []).forEach((r) => {
+        (r.items || []).forEach((it) => {
+          add(it.productId, 'main', toNum(it.returnTotalQty));
+          add(it.productId, 'free', toNum(it.returnFreeTotalQty ?? it.returnFreeQty));
+        });
+        (r.freeItems || []).forEach((it) => add(it.productId, 'others', toNum(it.returnTotalQty)));
+      });
+      return map;
+    };
+
+    // customer return korle stock e ferot, return edit/delete korle abar kome
+    const adjustReturnStock = async (existing, newHistory) => {
+      const allocs = (existing.stockAllocations || []).map((a) => ({ ...a, returned: toNum(a.returned) }));
+      const oldMap = sumReturns(existing.returnHistory);
+      const newMap = sumReturns(newHistory);
+      const pids = new Set([...oldMap.keys(), ...newMap.keys()]);
+
+      for (const key of pids) {
+        const sep = key.lastIndexOf('|');
+        const pid = key.slice(0, sep);
+        const kind = key.slice(sep + 1);
+        let delta = (newMap.get(key) || 0) - (oldMap.get(key) || 0);
+        const list = allocs
+          .filter((a) => String(a.productId) === pid && (a.kind || 'main') === kind)
+          .reverse();
+
+        if (delta > 0) {
+          for (const a of list) {
+            if (delta <= 0) break;
+            const take = Math.min(toNum(a.qty) - a.returned, delta);
+            if (take <= 0) continue;
+            a.returned += take;
+            delta -= take;
+            await stockPurchaseCollection.updateOne({ _id: new ObjectId(a.batchId) }, { $inc: { availableQty: take } });
+          }
+        } else if (delta < 0) {
+          delta = -delta;
+          for (const a of list) {
+            if (delta <= 0) break;
+            const take = Math.min(a.returned, delta);
+            if (take <= 0) continue;
+            a.returned -= take;
+            delta -= take;
+            await stockPurchaseCollection.updateOne({ _id: new ObjectId(a.batchId) }, { $inc: { availableQty: -take } });
+          }
+        }
+      }
+      return allocs;
+    };
+
+    const stockErrorBody = (shortages) => ({
+      message: 'স্টকে পণ্য নেই!',
+      shortages,
     });
 
-    // ১০. ট্র্যাশ থেকে একটি আইটেম পার্মানেন্টলি ডিলিট করার জন্য
-    app.delete('/trash/:id', async (req, res) => {
-      try {
-        const id = req.params.id;
-        const query = { _id: new ObjectId(id) };
-        const result = await trashCollection.deleteOne(query);
-        res.send(result);
-      } catch (error) {
-        res.status(500).send({ message: "Error permanently deleting item" });
+    const sendPlanError = (res, plan) => {
+      if (plan.shortages.length > 0) return res.status(400).send(stockErrorBody(plan.shortages));
+      return res.status(409).send({
+        needsConfirm: true,
+        message: 'স্টক সমন্বয় করতে নিশ্চিত করুন',
+        borrows: plan.borrows,
+      });
+    };
+
+    // OrderAdd er bulk return (returnItems) ke sales-bulk-return e sync kora
+    const syncSalesBulkFromOrder = async (id) => {
+      const s = await salesCollection.findOne({ _id: new ObjectId(id) });
+      if (!s || s.status !== 'Delivered') return;
+      const retItems = (s.returnItems || []).filter(
+        (it) => toNum(it.totalQty) > 0 || toNum(it.freeQty) > 0
+      );
+      if (retItems.length === 0) {
+        await salesBulkReturnCollection.deleteOne({ saleId: id });
+        return;
       }
+      const total = Math.round(retItems.reduce((a, i) => a + toNum(i.subtotal), 0) * 100) / 100;
+      const existingBulk = await salesBulkReturnCollection.findOne({ saleId: id });
+      const bulkPlan = await buildSalesBulkReturnPlan(retItems, existingBulk?._id || null);
+      await salesBulkReturnCollection.updateOne(
+        { saleId: id },
+        {
+          $set: {
+            fromSales: true,
+            saleId: id,
+            invoiceNo: s.invoiceNo || s.orderNo,
+            customerId: s.customerId,
+            customer: s.customer,
+            phone: s.phone,
+            address: s.address,
+            returnDate: s.deliveryDate || s.orderDate,
+            items: retItems,
+            grandTotal: total,
+            returnAmount: total,
+            note: s.orderNote || '',
+            stockAllocations: bulkPlan.allocations,
+          },
+          $setOnInsert: { createdAt: new Date().toISOString() },
+        },
+        { upsert: true }
+      );
+    };
+
+    // sales related api
+
+    app.get('/sales', async (req, res) => {
+      const result = await salesCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.get('/sales/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await salesCollection.findOne(query);
+      res.send(result);
+    });
+
+    app.post('/sales', async (req, res) => {
+      const { stockBorrowConfirmed, ...item } = req.body;
+      item.createdAt = new Date().toISOString();
+      if (item.status === 'Delivered') item.deliveredAt = item.createdAt;
+      let allocations = [];
+      if (item.status === 'Delivered') {
+        const plan = await buildStockPlan(item.items || [], item.freeItems || [], null, {
+          allowBorrow: stockBorrowConfirmed === true,
+        });
+        if (!plan.ok) return sendPlanError(res, plan);
+        allocations = plan.allocations;
+        item.stockAllocations = allocations;
+      }
+      const result = await salesCollection.insertOne(item);
+      if (allocations.length > 0) await applyAllocations(allocations);
+      if (result.insertedId) await syncSalesBulkFromOrder(String(result.insertedId));
+      res.send(result);
+    });
+
+    app.delete('/sales/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const existingSale = await salesCollection.findOne(query);
+      const result = await salesCollection.deleteOne(query);
+      await salesBulkReturnCollection.deleteMany({ saleId: id });
+
+      // delivered order delete hole stock ferot jabe
+      for (const a of existingSale?.stockAllocations || []) {
+        const back = toNum(a.qty) - toNum(a.returned);
+        if (back > 0) {
+          await stockPurchaseCollection.updateOne(
+            { _id: new ObjectId(a.batchId) },
+            { $inc: { availableQty: back } }
+          );
+        }
+      }
+      res.send(result);
+    });
+
+    app.put('/sales/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const { unsetFields, stockBorrowConfirmed, ...updatedData } = req.body;
+      const allowBorrow = stockBorrowConfirmed === true;
+
+      const updateDoc = {
+        $set: updatedData,
+      };
+
+      if (Array.isArray(unsetFields) && unsetFields.length > 0) {
+        updateDoc.$unset = {};
+        unsetFields.forEach((field) => {
+          updateDoc.$unset[field] = "";
+        });
+      }
+
+      const existingSale = await salesCollection.findOne(query);
+      let allocationsToApply = null;
+
+      if (existingSale && updatedData.status === 'Delivered' && existingSale.status !== 'Delivered') {
+        updatedData.deliveredAt = new Date().toISOString();
+      }
+      if (existingSale && Array.isArray(updatedData.returnHistory)) {
+        updatedData.returnHistory = stampReturns(updatedData.returnHistory, existingSale.returnHistory);
+      }
+
+      if (existingSale && updatedData.status === 'Delivered' && existingSale.status !== 'Delivered') {
+        // Delivery: age stock check
+        const plan = await buildStockPlan(
+          updatedData.items ?? existingSale.items ?? [],
+          updatedData.freeItems ?? existingSale.freeItems ?? [],
+          id,
+          { allowBorrow }
+        );
+        if (!plan.ok) return sendPlanError(res, plan);
+        allocationsToApply = plan.allocations;
+        updatedData.stockAllocations = plan.allocations;
+      } else if (
+        existingSale &&
+        Array.isArray(updatedData.returnHistory) &&
+        (existingSale.stockAllocations || []).length > 0
+      ) {
+        // Sales return: stock adjust
+        updatedData.stockAllocations = await adjustReturnStock(existingSale, updatedData.returnHistory);
+      } else if (
+        existingSale &&
+        existingSale.status === 'Delivered' &&
+        Array.isArray(updatedData.items) &&
+        !Array.isArray(updatedData.returnHistory) &&
+        (existingSale.returnHistory || []).length === 0
+      ) {
+        // Delivered order edit: purano stock ferot diye notun kore allocate
+        const restoreOld = async (sign) => {
+          for (const a of existingSale.stockAllocations || []) {
+            const back = toNum(a.qty) - toNum(a.returned);
+            if (back > 0) {
+              await stockPurchaseCollection.updateOne(
+                { _id: new ObjectId(a.batchId) },
+                { $inc: { availableQty: sign * back } }
+              );
+            }
+          }
+        };
+        await restoreOld(1);
+        const plan = await buildStockPlan(
+          updatedData.items,
+          updatedData.freeItems ?? existingSale.freeItems ?? [],
+          id,
+          { allowBorrow }
+        );
+        if (!plan.ok) {
+          await restoreOld(-1);
+          return sendPlanError(res, plan);
+        }
+        allocationsToApply = plan.allocations;
+        updatedData.stockAllocations = plan.allocations;
+      }
+
+      const result = await salesCollection.updateOne(query, updateDoc);
+      if (allocationsToApply) await applyAllocations(allocationsToApply);
+      await syncSalesBulkFromOrder(id);
+      res.send(result);
     });
 
 
@@ -2561,44 +2745,6 @@ app.get('/', (req, res) => {
 // keep-alive route
 app.get('/ping', (req, res) => {
   res.send('pong');
-});
-
-// ✅ SEO-optimized Sitemap route (Only Blogs + Static Pages)
-app.get("/sitemap.xml", async (req, res) => {
-  try {
-    res.header("Content-Type", "application/xml");
-    res.header("Content-Encoding", "gzip");
-
-    const smStream = new SitemapStream({ hostname: "https://bashaybazar.com" });
-    const pipeline = smStream.pipe(createGzip());
-
-    // 👉 Static pages
-    smStream.write({ url: "/", changefreq: "daily", priority: 1.0, lastmod: new Date() });
-    smStream.write({ url: "/about", changefreq: "weekly", priority: 0.8, lastmod: new Date() });
-    smStream.write({ url: "/contact", changefreq: "weekly", priority: 0.8, lastmod: new Date() });
-
-    // 👉 Dynamic Blogs (✅ Only Blogs)
-    const blogs = await client.db("squirrelDb").collection("blog").find().toArray();
-    blogs.forEach((blog) => {
-      if (blog.blogSlug) {
-        smStream.write({
-          url: `/blog/${blog.blogSlug}`,
-          changefreq: "weekly",
-          priority: 0.7,
-          lastmod: blog.updatedAt || blog.createdAt || new Date()
-        });
-      }
-    });
-
-    smStream.end();
-
-    // ✅ Directly pipe to response (gzip handled correctly)
-    pipeline.pipe(res).on("error", (e) => { throw e });
-
-  } catch (e) {
-    console.error("Sitemap generation error:", e);
-    res.status(500).end();
-  }
 });
 
 
