@@ -1314,6 +1314,12 @@ async function run() {
 
 
 
+
+
+
+
+
+
     // stock adjustment related api
 
     app.get('/damage-return', async (req, res) => {
@@ -1544,7 +1550,9 @@ async function run() {
 
     app.put('/sales-damage/:id', async (req, res) => {
       const { _id: _ignoreId, stockAllocations: _ignoreAlloc, ...updatedData } = req.body;
-      updatedData.stockAllocations = [];
+      updatedData.editedAt = new Date().toISOString();
+      const plan = await buildSalesBulkReturnPlan(updatedData.items || [], id);
+      updatedData.editedAt = new Date().toISOString();
       if (!updatedData.customerId) {
         const plan = await buildDamagePlan(updatedData.items || [], req.params.id);
         if (!plan.ok) return res.status(400).send({ message: 'স্টকে পণ্য নেই!', shortages: plan.shortages });
@@ -2894,6 +2902,9 @@ async function run() {
             items: retItems,
             returnAmount: total,
             note: s.orderNote || '',
+            ...(existingBulk && JSON.stringify(existingBulk.items || []) !== JSON.stringify(retItems)
+              ? { editedAt: new Date().toISOString() }
+              : {}),
             stockAllocations: bulkPlan.allocations,
           },
           $setOnInsert: { createdAt: new Date().toISOString() },
@@ -2920,6 +2931,7 @@ async function run() {
       const { stockBorrowConfirmed, ...item } = req.body;
       item.createdAt = new Date().toISOString();
       if (item.status === 'Delivered') item.deliveredAt = item.createdAt;
+      if ((item.damageItems || []).length > 0) item.damageAt = item.createdAt;
       let allocations = [];
       if (item.status === 'Delivered') {
         const plan = await buildStockPlan(item.items || [], item.freeItems || [], null, {
@@ -2975,8 +2987,40 @@ async function run() {
       const existingSale = await salesCollection.findOne(query);
       let allocationsToApply = null;
 
+      // damageItems notun add/change hole time track kora (Sales Return Report er jonno)
+      if (existingSale && Array.isArray(updatedData.damageItems) && updatedData.damageItems.length > 0) {
+        const dSig = (list) =>
+          JSON.stringify(
+            (list || []).map((i) => [String(i.productId), toNum(i.totalQty), toNum(i.freeQty), toNum(i.sellPricePcs)])
+          );
+        if (!existingSale.damageAt || (existingSale.damageItems || []).length === 0) {
+          updatedData.damageAt = new Date().toISOString();
+        } else if (dSig(existingSale.damageItems) !== dSig(updatedData.damageItems)) {
+          updatedData.damageEditedAt = new Date().toISOString();
+        }
+      }
+
       if (existingSale && updatedData.status === 'Delivered' && existingSale.status !== 'Delivered') {
         updatedData.deliveredAt = new Date().toISOString();
+        // Prothom bar delivery hole original ORDER data orderSnapshot e save thakbe
+        if (!existingSale.orderSnapshot) {
+          updatedData.orderSnapshot = {
+            items: existingSale.items || [],
+            freeItems: existingSale.freeItems || [],
+            damageItems: existingSale.damageItems || [],
+            returnItems: existingSale.returnItems || [],
+            subTotal: existingSale.subTotal ?? existingSale.grandTotal,
+            productWiseDiscount: existingSale.productWiseDiscount,
+            productWiseDiscountPercent: existingSale.productWiseDiscountPercent,
+            overallDiscount: existingSale.overallDiscount,
+            overallDiscountType: existingSale.overallDiscountType,
+            overallDiscountValue: existingSale.overallDiscountValue,
+            adjustment: existingSale.adjustment,
+            damageAdjustmentAmount: existingSale.damageAdjustmentAmount,
+            returnAdjustmentAmount: existingSale.returnAdjustmentAmount,
+            payableAmount: existingSale.payableAmount,
+          };
+        }
       }
       if (existingSale && Array.isArray(updatedData.returnHistory)) {
         updatedData.returnHistory = stampReturns(updatedData.returnHistory, existingSale.returnHistory);
