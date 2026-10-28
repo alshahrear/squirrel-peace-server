@@ -12,6 +12,32 @@ const port = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
+// data change track (sob device er jonno)
+const versionCol = () => client.db("squirrelDb").collection("meta");
+app.use((req, res, next) => {
+  if (req.method === 'GET') res.set('Cache-Control', 'no-store');
+  if (req.method !== 'GET' && req.method !== 'OPTIONS' && req.path !== '/jwt' && req.path !== '/client/login') {
+    res.on('finish', () => {
+      if (res.statusCode < 400) {
+        versionCol()
+          .updateOne({ _id: 'dataVersion' }, { $inc: { version: 1 } }, { upsert: true })
+          .catch(() => { });
+      }
+    });
+  }
+  next();
+});
+app.get('/data-version', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    const doc = await versionCol().findOne({ _id: 'dataVersion' });
+    res.send({ version: doc?.version || 0 });
+  } catch (e) {
+    res.status(500).send({ error: 'version failed' });
+  }
+});
+
+
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.3wtib.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
 
 // Create a MongoClient with a MongoClientOptions object to set the Stable API version
@@ -56,6 +82,7 @@ async function run() {
     const salesBulkReturnCollection = client.db("squirrelDb").collection("salesBulkReturn");
     const salesDamageCollection = client.db("squirrelDb").collection('salesDamage');
     const damageReturnCollection = client.db("squirrelDb").collection('damageReturn');
+    const PurchaseDuePaymentCollection = client.db("squirrelDb").collection('purchaseDuePayment');
 
 
     // jwt related api
@@ -910,6 +937,7 @@ async function run() {
           contactName: updatedItem.contactName,
           businessNumber: updatedItem.businessNumber,
           openingBalance: updatedItem.openingBalance,
+          openingBalanceType: updatedItem.openingBalanceType,
           address: updatedItem.address,
           note: updatedItem.note
         },
@@ -923,6 +951,50 @@ async function run() {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
       const result = await companyCollection.deleteOne(query);
+      res.send(result);
+    });
+
+
+
+
+    // Purchase Due Payment related APIs
+
+    // Get all due payments (newest first)
+    app.get('/purchase-due-payment', async (req, res) => {
+      const result = await PurchaseDuePaymentCollection.find().sort({ _id: -1 }).toArray();
+      res.send(result);
+    });
+
+    // Post a new due payment
+    app.post('/purchase-due-payment', async (req, res) => {
+      const item = req.body;
+      const amount = Math.round((Number(item.amount) || 0) * 100) / 100;
+
+      if (!item.company || !item.date || !item.paymentMethod || !item.paymentAccount || amount <= 0) {
+        return res.status(400).send({ message: 'Company, date, payment method, account and amount are required' });
+      }
+
+      const doc = {
+        company: item.company,
+        companyId: item.companyId || '',
+        companyContact: item.companyContact || '',
+        date: item.date, // YYYY-MM-DD
+        paymentMethod: item.paymentMethod,
+        paymentAccount: item.paymentAccount,
+        amount,
+        note: item.note || '',
+        createdAt: item.createdAt || new Date().toLocaleString('en-GB'),
+      };
+
+      const result = await PurchaseDuePaymentCollection.insertOne(doc);
+      res.send(result);
+    });
+
+    // Delete a due payment
+    app.delete('/purchase-due-payment/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await PurchaseDuePaymentCollection.deleteOne(query);
       res.send(result);
     });
 
@@ -1010,6 +1082,7 @@ async function run() {
           contactName: updatedItem.contactName,
           businessNumber: updatedItem.businessNumber,
           openingBalance: updatedItem.openingBalance,
+          openingBalanceType: updatedItem.openingBalanceType,
           creditLimit: updatedItem.creditLimit,
           address: updatedItem.address,
           route: updatedItem.customerType === 'Wholesale Customer' ? updatedItem.route : '',
@@ -1027,6 +1100,8 @@ async function run() {
       const result = await customerCollection.deleteOne(query);
       res.send(result);
     });
+
+    
 
 
     // Unit related API 
@@ -1127,18 +1202,25 @@ async function run() {
       }
     });
 
-    // ২. নতুন রাউট যোগ করার সময় (কোড সহ)
+    // ২. নতুন রাউট যোগ করার সময়
     app.post('/route', async (req, res) => {
       try {
         const item = req.body;
 
         // সবচেয়ে বড় order ভ্যালু বের করে তার সাথে ১ যোগ করা
+        const duplicate = await routeCollection.findOne(
+          { name: String(item.name || '').trim() },
+          { collation: { locale: 'en', strength: 2 } }
+        );
+        if (duplicate) {
+          return res.status(400).send({ message: 'This route name already exists!' });
+        }
+
         const lastroute = await routeCollection.findOne({}, { sort: { order: -1 } });
         const nextOrder = lastroute ? (lastroute.order + 1) : 1;
 
         const newroute = {
           name: item.name,
-          code: item.code || "", // নতুন code ফিল্ড যুক্ত হলো
           isActive: item.isActive !== undefined ? item.isActive : true,
           order: nextOrder,
           createdAt: new Date().toLocaleString("en-GB", {
@@ -1159,19 +1241,27 @@ async function run() {
       }
     });
 
-    // ৩. নির্দিষ্ট রাউট আপডেট করার জন্য (কোড সহ)
+    // ৩. নির্দিষ্ট রাউট আপডেট করার জন্য
     app.put('/route/:id', async (req, res) => {
       try {
         const id = req.params.id;
-        const { name, code, isActive } = req.body; // code রিসিভ করা হলো
+        const { name, isActive } = req.body;
+
+        const duplicate = await routeCollection.findOne(
+          { name: String(name || '').trim(), _id: { $ne: new ObjectId(id) } },
+          { collation: { locale: 'en', strength: 2 } }
+        );
+        if (duplicate) {
+          return res.status(400).send({ message: 'This route name already exists!' });
+        }
         const query = { _id: new ObjectId(id) };
 
         const updateDoc = {
           $set: {
             name: name,
-            code: code, // code আপডেট করা হলো
             isActive: isActive
-          }
+          },
+          $unset: { code: "" }
         };
 
         const result = await routeCollection.updateOne(query, updateDoc);
@@ -1550,8 +1640,6 @@ async function run() {
 
     app.put('/sales-damage/:id', async (req, res) => {
       const { _id: _ignoreId, stockAllocations: _ignoreAlloc, ...updatedData } = req.body;
-      updatedData.editedAt = new Date().toISOString();
-      const plan = await buildSalesBulkReturnPlan(updatedData.items || [], id);
       updatedData.editedAt = new Date().toISOString();
       if (!updatedData.customerId) {
         const plan = await buildDamagePlan(updatedData.items || [], req.params.id);
@@ -1951,15 +2039,23 @@ async function run() {
           excludeDamageId: req.query.excludeDamageId || null,
         });
         const map = {};
-        pools.forEach((x) => {
-          const k = String(x.b.productId);
-          if (!map[k]) map[k] = { paid: 0, free: 0 };
-          map[k].paid += x.paid;
-          map[k].free += x.free;
-          const nk = `name:${x.b.productName}`;
-          if (!map[nk]) map[nk] = { paid: 0, free: 0 };
-          map[nk].paid += x.paid;
-          map[nk].free += x.free;
+               pools.forEach((x) => {
+          const paidQ = toNum(x.b.paidQty);
+          const cost = x.b.isFreeProduct || paidQ <= 0 ? 0 : Math.round((toNum(x.b.netCost) / paidQ) * 100) / 100;
+          const batch = {
+            batchId: String(x.b._id),
+            batchNo: x.b.batchNo,
+            invoiceNo: x.b.invoiceNo,
+            cost,
+            paid: x.paid,
+            free: x.free,
+          };
+          [String(x.b.productId), `name:${x.b.productName}`].forEach((k) => {
+            if (!map[k]) map[k] = { paid: 0, free: 0, batches: [] };
+            map[k].paid += x.paid;
+            map[k].free += x.free;
+            map[k].batches.push(batch);
+          });
         });
         res.send(map);
       } catch (err) {
@@ -2091,8 +2187,15 @@ async function run() {
       res.send(result);
     });
 
+    const recentKeys = new Set();
     app.post('/purchase', async (req, res) => {
       const item = req.body;
+      if (item.invoiceNo) {
+        const key = `p:${item.invoiceNo}`;
+        if (recentKeys.has(key)) return res.send({ acknowledged: true, duplicate: true });
+        recentKeys.add(key);
+        setTimeout(() => recentKeys.delete(key), 15000);
+      }
       const result = await purchaseCollection.insertOne(item);
       res.send(result);
     });
@@ -2210,7 +2313,11 @@ async function run() {
             const items = purchase.items || [];
             const freeItems = purchase.freeItems || [];
             const itemsSubtotalSum = items.reduce((s, it) => s + (Number(it.itemTotal ?? it.subtotal) || 0), 0);
-            const payable = Number(purchase.payableAmount) || 0;
+            // Return Adjustment ও Damage Adjustment cost হিসাব থেকে বাদ (আবার যোগ করে আগের payable বের করা হলো)
+            const payable =
+              (Number(purchase.payableAmount) || 0) +
+              (Number(purchase.returnAdjustmentAmount) || 0) +
+              (Number(purchase.damageAdjustmentAmount) || 0);
 
             // Common info (protita batch a thakbe)
             const common = {
@@ -2929,6 +3036,12 @@ async function run() {
 
     app.post('/sales', async (req, res) => {
       const { stockBorrowConfirmed, ...item } = req.body;
+      if (item.orderNo) {
+        const key = `s:${item.orderNo}`;
+        if (recentKeys.has(key)) return res.send({ acknowledged: true, duplicate: true });
+        recentKeys.add(key);
+        setTimeout(() => recentKeys.delete(key), 10000);
+      }
       item.createdAt = new Date().toISOString();
       if (item.status === 'Delivered') item.deliveredAt = item.createdAt;
       if ((item.damageItems || []).length > 0) item.damageAt = item.createdAt;
