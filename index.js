@@ -959,9 +959,41 @@ async function run() {
 
     // Purchase Due Payment related APIs
 
+    // Fallback invoice no (YYMMDDHHMMSS, Asia/Dhaka time)
+    const generateInvoiceNo = () => {
+      const parts = new Intl.DateTimeFormat('en-GB', {
+        timeZone: 'Asia/Dhaka',
+        year: '2-digit',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hourCycle: 'h23',
+      }).formatToParts(new Date());
+      const get = (t) => parts.find((p) => p.type === t).value;
+      return `${get('year')}${get('month')}${get('day')}${get('hour')}${get('minute')}${get('second')}`;
+    };
+
     // Get all due payments (newest first)
     app.get('/purchase-due-payment', async (req, res) => {
-      const result = await PurchaseDuePaymentCollection.find().sort({ _id: -1 }).toArray();
+      const list = await PurchaseDuePaymentCollection.find().sort({ _id: -1 }).toArray();
+      // invoiceNo na thakle _id er timestamp theke generate
+      const result = list.map((p) => {
+        if (p.invoiceNo) return p;
+        const parts = new Intl.DateTimeFormat('en-GB', {
+          timeZone: 'Asia/Dhaka',
+          year: '2-digit',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hourCycle: 'h23',
+        }).formatToParts(new ObjectId(p._id).getTimestamp());
+        const get = (t) => parts.find((x) => x.type === t).value;
+        return { ...p, invoiceNo: `${get('year')}${get('month')}${get('day')}${get('hour')}${get('minute')}${get('second')}` };
+      });
       res.send(result);
     });
 
@@ -983,7 +1015,8 @@ async function run() {
         paymentAccount: item.paymentAccount,
         amount,
         note: item.note || '',
-        createdAt: item.createdAt || new Date().toLocaleString('en-GB'),
+        invoiceNo: item.invoiceNo || generateInvoiceNo(),
+        createdAt: item.createdAt || new Date().toLocaleString('en-GB', { timeZone: 'Asia/Dhaka' }),
       };
 
       const result = await PurchaseDuePaymentCollection.insertOne(doc);
@@ -1101,7 +1134,7 @@ async function run() {
       res.send(result);
     });
 
-    
+
 
 
     // Unit related API 
@@ -1425,6 +1458,7 @@ async function run() {
     app.post('/damage-return', async (req, res) => {
       const item = req.body;
       item.createdAt = new Date().toISOString();
+      item.status = 'Pending';
       const result = await damageReturnCollection.insertOne(item);
       res.send(result);
     });
@@ -2030,6 +2064,9 @@ async function run() {
       return { ok: shortages.length === 0, shortages, allocations };
     };
 
+
+
+
     // purchase bulk return related api
 
     app.get('/bulk-return-stock', async (req, res) => {
@@ -2039,7 +2076,7 @@ async function run() {
           excludeDamageId: req.query.excludeDamageId || null,
         });
         const map = {};
-               pools.forEach((x) => {
+        pools.forEach((x) => {
           const paidQ = toNum(x.b.paidQty);
           const cost = x.b.isFreeProduct || paidQ <= 0 ? 0 : Math.round((toNum(x.b.netCost) / paidQ) * 100) / 100;
           const batch = {
@@ -2314,10 +2351,19 @@ async function run() {
             const freeItems = purchase.freeItems || [];
             const itemsSubtotalSum = items.reduce((s, it) => s + (Number(it.itemTotal ?? it.subtotal) || 0), 0);
             // Return Adjustment ও Damage Adjustment cost হিসাব থেকে বাদ (আবার যোগ করে আগের payable বের করা হলো)
-            const payable =
-              (Number(purchase.payableAmount) || 0) +
-              (Number(purchase.returnAdjustmentAmount) || 0) +
-              (Number(purchase.damageAdjustmentAmount) || 0);
+            // Cost shudhu product subtotal - overall discount +/- adjustment theke hisab hobe
+            // (Return / Damage / Previous Due / Get adjustment ar payable clamp er kono effect nai)
+            const overallVal =
+              purchase.overallDiscountValue !== undefined && purchase.overallDiscountValue !== null
+                ? toNum(purchase.overallDiscountValue)
+                : purchase.overallDiscountType === 'percent'
+                  ? (itemsSubtotalSum * toNum(purchase.overallDiscount)) / 100
+                  : toNum(purchase.overallDiscount);
+            const adjAmt = toNum(purchase.adjustment?.amount);
+            const payable = Math.max(
+              itemsSubtotalSum - overallVal + (purchase.adjustment?.type === '-' ? -adjAmt : adjAmt),
+              0
+            );
 
             // Common info (protita batch a thakbe)
             const common = {
