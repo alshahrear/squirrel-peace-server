@@ -83,6 +83,7 @@ async function run() {
     const salesDamageCollection = client.db("squirrelDb").collection('salesDamage');
     const damageReturnCollection = client.db("squirrelDb").collection('damageReturn');
     const PurchaseDuePaymentCollection = client.db("squirrelDb").collection('purchaseDuePayment');
+    const SalesDuePaymentCollection = client.db("squirrelDb").collection('salesDuePayment');
 
 
     // jwt related api
@@ -1015,6 +1016,8 @@ async function run() {
         paymentAccount: item.paymentAccount,
         amount,
         note: item.note || '',
+        type: item.type === 'Get' || item.status === 'Get' ? 'Get' : 'Pay',
+        status: item.type === 'Get' || item.status === 'Get' ? 'Get' : 'Pay',
         invoiceNo: item.invoiceNo || generateInvoiceNo(),
         createdAt: item.createdAt || new Date().toLocaleString('en-GB', { timeZone: 'Asia/Dhaka' }),
       };
@@ -1028,6 +1031,68 @@ async function run() {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
       const result = await PurchaseDuePaymentCollection.deleteOne(query);
+      res.send(result);
+    });
+
+
+
+
+    // Sales Due Payment related APIs
+
+    // Get all sales due payments (newest first)
+    app.get('/sales-due-payment', async (req, res) => {
+      const list = await SalesDuePaymentCollection.find().sort({ _id: -1 }).toArray();
+      const result = list.map((p) => {
+        if (p.invoiceNo) return p;
+        const parts = new Intl.DateTimeFormat('en-GB', {
+          timeZone: 'Asia/Dhaka',
+          year: '2-digit',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hourCycle: 'h23',
+        }).formatToParts(new ObjectId(p._id).getTimestamp());
+        const get = (t) => parts.find((x) => x.type === t).value;
+        return { ...p, invoiceNo: `${get('year')}${get('month')}${get('day')}${get('hour')}${get('minute')}${get('second')}` };
+      });
+      res.send(result);
+    });
+
+    // Post a new sales due payment
+    app.post('/sales-due-payment', async (req, res) => {
+      const item = req.body;
+      const amount = Math.round((Number(item.amount) || 0) * 100) / 100;
+
+      if (!item.customer || !item.date || !item.paymentMethod || !item.paymentAccount || amount <= 0) {
+        return res.status(400).send({ message: 'Customer, date, payment method, account and amount are required' });
+      }
+
+      const doc = {
+        customer: item.customer,
+        customerId: item.customerId || '',
+        customerContact: item.customerContact || '',
+        date: item.date, // YYYY-MM-DD
+        paymentMethod: item.paymentMethod,
+        paymentAccount: item.paymentAccount,
+        amount,
+        note: item.note || '',
+        type: item.type === 'Pay' || item.status === 'Pay' ? 'Pay' : 'Get',
+        status: item.type === 'Pay' || item.status === 'Pay' ? 'Pay' : 'Get',
+        invoiceNo: item.invoiceNo || generateInvoiceNo(),
+        createdAt: item.createdAt || new Date().toLocaleString('en-GB', { timeZone: 'Asia/Dhaka' }),
+      };
+
+      const result = await SalesDuePaymentCollection.insertOne(doc);
+      res.send(result);
+    });
+
+    // Delete a sales due payment
+    app.delete('/sales-due-payment/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await SalesDuePaymentCollection.deleteOne(query);
       res.send(result);
     });
 
