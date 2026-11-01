@@ -463,22 +463,24 @@ async function run() {
     });
 
     app.put('/transfer/:id', async (req, res) => {
-      const id = req.params.id;
-      const updatedItem = req.body;
-      const filter = { _id: new ObjectId(id) };
-      const updateDoc = {
-        $set: {
-          transferFrom: updatedItem.transferFrom,
-          transferTo: updatedItem.transferTo,
-          date: updatedItem.date,
-          fromAccount: updatedItem.fromAccount,
-          toAccount: updatedItem.toAccount,
-          amount: updatedItem.amount,
-          note: updatedItem.note,
-        },
-      };
-      const result = await transferCollection.updateOne(filter, updateDoc);
-      res.send(result);
+      try {
+        const { id } = req.params;
+        const { _id: _ignoreId, createdAt: _ignoreCreated, ...updatedData } = req.body;
+
+        const result = await transferCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updatedData }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ error: 'Transfer record not found' });
+        }
+
+        res.status(200).json({ message: 'Transfer updated successfully' });
+      } catch (error) {
+        console.error('Error updating transfer:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+      }
     });
 
     app.delete('/transfer/:id', async (req, res) => {
@@ -550,18 +552,24 @@ async function run() {
     });
 
     app.put('/account-heads/:id', async (req, res) => {
-      const id = req.params.id;
-      const updatedData = req.body;
-      const query = { _id: new ObjectId(id) };
-      const updateDoc = {
-        $set: {
-          category: updatedData.category,
-          name: updatedData.name,
-          isActive: updatedData.isActive,
-        },
-      };
-      const result = await headsCollection.updateOne(query, updateDoc);
-      res.send(result);
+      try {
+        const { id } = req.params;
+        const { _id: _ignoreId, createdAt: _ignoreCreated, ...updatedData } = req.body;
+
+        const result = await headsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updatedData }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ error: 'Account head record not found' });
+        }
+
+        res.status(200).json({ message: 'Account head updated successfully' });
+      } catch (error) {
+        console.error('Error updating account head:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+      }
     });
 
     app.delete('/account-heads/:id', async (req, res) => {
@@ -666,7 +674,6 @@ async function run() {
 
     // Investment related APIs
 
-
     app.get('/investment', async (req, res) => {
       try {
         const result = await investmentCollection.find().toArray();
@@ -690,25 +697,22 @@ async function run() {
 
     app.put('/investment/:id', async (req, res) => {
       try {
-        const id = req.params.id;
-        const updatedData = req.body;
-        const filter = { _id: new ObjectId(id) };
-        const updateDoc = {
-          $set: {
-            date: updatedData.date,
-            accountType: updatedData.accountType,
-            bankName: updatedData.bankName || '',
-            accountNumber: updatedData.accountNumber || '',
-            accountBranch: updatedData.accountBranch || '',
-            accountName: updatedData.accountName || '',
-            amount: Number(updatedData.amount),
-            note: updatedData.note || ''
-          }
-        };
-        const result = await investmentCollection.updateOne(filter, updateDoc);
-        res.send(result);
+        const { id } = req.params;
+        const { _id: _ignoreId, createdAt: _ignoreCreated, ...updatedData } = req.body;
+
+        const result = await investmentCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updatedData }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ error: 'Investment record not found' });
+        }
+
+        res.status(200).json({ message: 'Investment updated successfully' });
       } catch (error) {
-        res.status(500).send({ error: 'Failed to update investment' });
+        console.error('Error updating investment:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
       }
     });
 
@@ -742,7 +746,7 @@ async function run() {
       try {
         const investmentId = req.params.investmentId;
         const result = await adjustmentCollection
-          .find({ investmentId: investmentId })
+          .find({ adjustmentID: investmentId })
           .toArray();
         res.send(result);
       } catch (error) {
@@ -762,21 +766,22 @@ async function run() {
 
     app.put('/adjustment/:id', async (req, res) => {
       try {
-        const id = req.params.id;
-        const updatedData = req.body;
-        const filter = { _id: new ObjectId(id) };
-        const updateDoc = {
-          $set: {
-            date: updatedData.date,
-            mode: updatedData.mode,
-            amount: Number(updatedData.amount),
-            note: updatedData.note || ''
-          }
-        };
-        const result = await adjustmentCollection.updateOne(filter, updateDoc);
-        res.send(result);
+        const { id } = req.params;
+        const { _id: _ignoreId, createdAt: _ignoreCreated, ...updatedData } = req.body;
+
+        const result = await adjustmentCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updatedData }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ error: 'Adjustment record not found' });
+        }
+
+        res.status(200).json({ message: 'Adjustment updated successfully' });
       } catch (error) {
-        res.status(500).send({ error: 'Failed to update adjustment' });
+        console.error('Error updating adjustment:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
       }
     });
 
@@ -792,7 +797,7 @@ async function run() {
     });
 
 
-
+    // user related api
 
     // --- User Routes (Node.js & Express) ---
 
@@ -818,37 +823,25 @@ async function run() {
       }
     });
 
-    // Update user (PUT) - Handles empty password gracefully
+    // Update a user (PUT)
     app.put('/user/:id', async (req, res) => {
       try {
-        const id = req.params.id;
-        const updatedData = req.body;
+        const { id } = req.params;
+        const { _id: _ignoreId, createdAt: _ignoreCreated, ...updatedData } = req.body;
 
-        // যদি পাসওয়ার্ড ফিল্ড ফাঁকা থাকে, তবে ডাটাবেজে থাকা পুরোনো পাসওয়ার্ডটিই রেখে দেবো
-        if (!updatedData.password || updatedData.password.trim() === '') {
-          const existingUser = await userCollection.findOne({ _id: new ObjectId(id) });
-          if (existingUser) {
-            updatedData.password = existingUser.password;
-          }
+        const result = await userCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updatedData }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ error: 'User record not found' });
         }
 
-        const filter = { _id: new ObjectId(id) };
-        const updateDoc = {
-          $set: {
-            name: updatedData.name,
-            email: updatedData.email,
-            phone: updatedData.phone,
-            role: updatedData.role,
-            address: updatedData.address,
-            isActive: updatedData.isActive,
-            password: updatedData.password // আগের অথবা নতুন পাসওয়ার্ড
-          }
-        };
-
-        const result = await userCollection.updateOne(filter, updateDoc);
-        res.send(result);
+        res.status(200).json({ message: 'User updated successfully' });
       } catch (error) {
-        res.status(500).send({ error: 'Failed to update user' });
+        console.error('Error updating user:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
       }
     });
 
@@ -869,7 +862,6 @@ async function run() {
 
     // userRole related api
 
-
     // ১. সকল ইউজার রোল ফেচ করা (GET)
     app.get('/userRole', async (req, res) => {
       const result = await userRoleCollection.find().toArray();
@@ -883,18 +875,25 @@ async function run() {
       res.send(result);
     });
 
-    // ৩. ইউজার রোল আপডেট করা (PUT) - এডিট ফিচারের জন্য এটি লাগবে
     app.put('/userRole/:id', async (req, res) => {
-      const id = req.params.id;
-      const updatedItem = req.body;
-      const filter = { _id: new ObjectId(id) };
-      const updateDoc = {
-        $set: {
-          role: updatedItem.role,
-        },
-      };
-      const result = await userRoleCollection.updateOne(filter, updateDoc);
-      res.send(result);
+      try {
+        const { id } = req.params;
+        const { _id: _ignoreId, createdAt: _ignoreCreated, ...updatedData } = req.body;
+
+        const result = await userRoleCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updatedData }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ error: 'Role record not found' });
+        }
+
+        res.status(200).json({ message: 'Role updated successfully' });
+      } catch (error) {
+        console.error('Error updating role:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+      }
     });
 
     // ৪. ইউজার রোল ডিলিট করা (DELETE)
@@ -927,24 +926,24 @@ async function run() {
 
     // Update a company (PUT)
     app.put('/company/:id', async (req, res) => {
-      const id = req.params.id;
-      const updatedItem = req.body;
-      const filter = { _id: new ObjectId(id) };
-      const updateDoc = {
-        $set: {
-          businessName: updatedItem.businessName,
-          contactNumber: updatedItem.contactNumber,
-          email: updatedItem.email,
-          contactName: updatedItem.contactName,
-          businessNumber: updatedItem.businessNumber,
-          openingBalance: updatedItem.openingBalance,
-          openingBalanceType: updatedItem.openingBalanceType,
-          address: updatedItem.address,
-          note: updatedItem.note
-        },
-      };
-      const result = await companyCollection.updateOne(filter, updateDoc);
-      res.send(result);
+      try {
+        const { id } = req.params;
+        const { _id: _ignoreId, createdAt: _ignoreCreated, ...updatedData } = req.body;
+
+        const result = await companyCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updatedData }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ error: 'Company record not found' });
+        }
+
+        res.status(200).json({ message: 'Company updated successfully' });
+      } catch (error) {
+        console.error('Error updating company:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+      }
     });
 
     // Delete a company
@@ -1168,27 +1167,24 @@ async function run() {
 
     // Update a customer (PUT)
     app.put('/customer/:id', async (req, res) => {
-      const id = req.params.id;
-      const updatedItem = req.body;
-      const filter = { _id: new ObjectId(id) };
-      const updateDoc = {
-        $set: {
-          customerType: updatedItem.customerType,
-          businessName: updatedItem.businessName,
-          contactNumber: updatedItem.contactNumber,
-          email: updatedItem.email,
-          contactName: updatedItem.contactName,
-          businessNumber: updatedItem.businessNumber,
-          openingBalance: updatedItem.openingBalance,
-          openingBalanceType: updatedItem.openingBalanceType,
-          creditLimit: updatedItem.creditLimit,
-          address: updatedItem.address,
-          route: updatedItem.customerType === 'Wholesale Customer' ? updatedItem.route : '',
-          note: updatedItem.note
-        },
-      };
-      const result = await customerCollection.updateOne(filter, updateDoc);
-      res.send(result);
+      try {
+        const { id } = req.params;
+        const { _id: _ignoreId, createdAt: _ignoreCreated, ...updatedData } = req.body;
+
+        const result = await customerCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updatedData }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ error: 'Customer record not found' });
+        }
+
+        res.status(200).json({ message: 'Customer updated successfully' });
+      } catch (error) {
+        console.error('Error updating customer:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+      }
     });
 
     // Delete a customer
@@ -1251,21 +1247,22 @@ async function run() {
     // ৩. নির্দিষ্ট ইউনিট আপডেট করার জন্য
     app.put('/unit/:id', async (req, res) => {
       try {
-        const id = req.params.id;
-        const { name, isActive } = req.body;
-        const query = { _id: new ObjectId(id) };
+        const { id } = req.params;
+        const { _id: _ignoreId, createdAt: _ignoreCreated, order: _ignoreOrder, ...updatedData } = req.body;
 
-        const updateDoc = {
-          $set: {
-            name: name,
-            isActive: isActive
-          }
-        };
+        const result = await unitCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updatedData }
+        );
 
-        const result = await unitCollection.updateOne(query, updateDoc);
-        res.send(result);
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ error: 'Unit record not found' });
+        }
+
+        res.status(200).json({ message: 'Unit updated successfully' });
       } catch (error) {
-        res.status(500).send({ message: "Error updating unit", error });
+        console.error('Error updating unit:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
       }
     });
 
@@ -1342,30 +1339,34 @@ async function run() {
     // ৩. নির্দিষ্ট রাউট আপডেট করার জন্য
     app.put('/route/:id', async (req, res) => {
       try {
-        const id = req.params.id;
-        const { name, isActive } = req.body;
+        const { id } = req.params;
+        const { _id: _ignoreId, createdAt: _ignoreCreated, order: _ignoreOrder, ...updatedData } = req.body;
 
-        const duplicate = await routeCollection.findOne(
-          { name: String(name || '').trim(), _id: { $ne: new ObjectId(id) } },
-          { collation: { locale: 'en', strength: 2 } }
-        );
-        if (duplicate) {
-          return res.status(400).send({ message: 'This route name already exists!' });
+        if (updatedData.name !== undefined) {
+          updatedData.name = String(updatedData.name || '').trim();
+
+          const duplicate = await routeCollection.findOne(
+            { name: updatedData.name, _id: { $ne: new ObjectId(id) } },
+            { collation: { locale: 'en', strength: 2 } }
+          );
+          if (duplicate) {
+            return res.status(400).json({ message: 'This route name already exists!' });
+          }
         }
-        const query = { _id: new ObjectId(id) };
 
-        const updateDoc = {
-          $set: {
-            name: name,
-            isActive: isActive
-          },
-          $unset: { code: "" }
-        };
+        const result = await routeCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updatedData, $unset: { code: "" } }
+        );
 
-        const result = await routeCollection.updateOne(query, updateDoc);
-        res.send(result);
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ error: 'Route record not found' });
+        }
+
+        res.status(200).json({ message: 'Route updated successfully' });
       } catch (error) {
-        res.status(500).send({ message: "Error updating route", error });
+        console.error('Error updating route:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
       }
     });
 
@@ -1429,21 +1430,22 @@ async function run() {
     // ৩. নির্দিষ্ট ক্যাটাগরি আপডেট করার জন্য
     app.put('/category/:id', async (req, res) => {
       try {
-        const id = req.params.id;
-        const { name, isActive } = req.body;
-        const query = { _id: new ObjectId(id) };
+        const { id } = req.params;
+        const { _id: _ignoreId, createdAt: _ignoreCreated, order: _ignoreOrder, ...updatedData } = req.body;
 
-        const updateDoc = {
-          $set: {
-            name: name,
-            isActive: isActive
-          }
-        };
+        const result = await categoryCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updatedData }
+        );
 
-        const result = await categoryCollection.updateOne(query, updateDoc);
-        res.send(result);
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ error: 'Category record not found' });
+        }
+
+        res.status(200).json({ message: 'Category updated successfully' });
       } catch (error) {
-        res.status(500).send({ message: "Error updating category", error });
+        console.error('Error updating category:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
       }
     });
 
@@ -2292,6 +2294,9 @@ async function run() {
     const recentKeys = new Set();
     app.post('/purchase', async (req, res) => {
       const item = req.body;
+      if (toNum(item.paidAmount) > 0 && item.paymentMethod) {
+        item.paymentDate = new Date().toISOString();
+      }
       if (item.invoiceNo) {
         const key = `p:${item.invoiceNo}`;
         if (recentKeys.has(key)) return res.send({ acknowledged: true, duplicate: true });
@@ -2357,7 +2362,7 @@ async function run() {
         updatedData.paidAmount !== undefined &&
         updatedData.paidAmount !== null &&
         updatedData.paidAmount !== '';
-      if (hasNewPaid && returnOnly !== true) {
+      if (hasNewPaid && toNum(updatedData.paidAmount) > 0 && returnOnly !== true) {
         if (!hadPaid) {
           updatedData.paymentDate = new Date().toISOString();
         } else if (
