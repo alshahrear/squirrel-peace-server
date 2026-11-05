@@ -1072,6 +1072,10 @@ async function run() {
         customer: item.customer,
         customerId: item.customerId || '',
         customerContact: item.customerContact || '',
+        srId: item.srId || '',
+        sr: item.sr || '',
+        deliveredById: item.deliveredById || '',
+        deliveredBy: item.deliveredBy || '',
         date: item.date, // YYYY-MM-DD
         paymentMethod: item.paymentMethod,
         paymentAccount: item.paymentAccount,
@@ -1525,13 +1529,22 @@ async function run() {
     app.post('/damage-return', async (req, res) => {
       const item = req.body;
       item.createdAt = new Date().toISOString();
-      item.status = 'Pending';
+      if (item.payment && Number(item.payment.amount) > 0) {
+        item.status = 'Approved';
+        item.approvedAt = item.createdAt;
+      } else {
+        item.status = 'Pending';
+      }
       const result = await damageReturnCollection.insertOne(item);
       res.send(result);
     });
 
     app.put('/damage-return/:id', async (req, res) => {
       const { _id: _ignoreId, ...updatedData } = req.body;
+      if (updatedData.payment && Number(updatedData.payment.amount) > 0) {
+        updatedData.status = 'Approved';
+        updatedData.approvedAt = new Date().toISOString();
+      }
       const result = await damageReturnCollection.updateOne(
         { _id: new ObjectId(req.params.id) },
         { $set: updatedData }
@@ -2178,6 +2191,12 @@ async function run() {
       const plan = await buildBulkReturnPlan(item.items || []);
       if (!plan.ok) return res.status(400).send({ message: 'স্টকে পণ্য নেই!', shortages: plan.shortages });
       item.stockAllocations = plan.allocations;
+      if (item.payment && Number(item.payment.amount) > 0) {
+        item.status = 'Approved';
+        item.approvedAt = item.createdAt;
+      } else {
+        item.status = 'Pending';
+      }
       const result = await purchaseBulkReturnCollection.insertOne(item);
       res.send(result);
     });
@@ -2194,11 +2213,30 @@ async function run() {
       const query = { _id: new ObjectId(id) };
       const { _id: _ignoreId, stockAllocations: _ignoreAlloc, ...updatedData } = req.body;
       updatedData.editedAt = new Date().toISOString();
+      if (updatedData.payment && Number(updatedData.payment.amount) > 0) {
+        updatedData.status = 'Approved';
+        updatedData.approvedAt = new Date().toISOString();
+      } else {
+        delete updatedData.status;
+        delete updatedData.approvedAt;
+      }
       const plan = await buildBulkReturnPlan(updatedData.items || [], id);
       if (!plan.ok) return res.status(400).send({ message: 'স্টকে পণ্য নেই!', shortages: plan.shortages });
       updatedData.stockAllocations = plan.allocations;
       const result = await purchaseBulkReturnCollection.updateOne(query, { $set: updatedData });
       res.send(result);
+    });
+
+    app.patch('/purchase-bulk-return/:id/approve', async (req, res) => {
+      try {
+        const result = await purchaseBulkReturnCollection.updateOne(
+          { _id: new ObjectId(req.params.id) },
+          { $set: { status: 'Approved', approvedAt: new Date().toISOString() } }
+        );
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: 'Approve failed' });
+      }
     });
 
     app.delete('/purchase-bulk-return/:id', async (req, res) => {
@@ -2211,7 +2249,7 @@ async function run() {
     // purchase related api
 
     // return entry te exact time (createdAt) boshiye dey, age thakle sheta e rakhe
-    const stampReturns = (newList = [], oldList = []) => {
+    const stampReturns = (newList = [], oldList = [], withStatus = false) => {
       const oldMap = new Map((oldList || []).map((r) => [String(r.returnId), r]));
       const sig = (r) =>
         JSON.stringify([r.items, r.freeItems, r.totalReturnPcs, r.totalReturnFreeQty, r.totalReturnFreeItemsQty, r.totalReturnAmount]);
@@ -2219,6 +2257,14 @@ async function run() {
       return (newList || []).map((r) => {
         const old = oldMap.get(String(r.returnId));
         const out = { ...r, createdAt: r.createdAt || old?.createdAt || now };
+        if (withStatus) {
+          const hasPay = r.payment && Number(r.payment.amount) > 0;
+          const wasApproved = old ? (old.status || 'Approved') === 'Approved' : false;
+          const nowApproved = wasApproved || hasPay || r.status === 'Approved';
+          out.status = nowApproved ? 'Approved' : 'Pending';
+          if (nowApproved && !wasApproved) out.approvedAt = now;
+          else if (old?.approvedAt) out.approvedAt = old.approvedAt;
+        }
         if (old) {
           if (sig(old) !== sig(r)) out.editedAt = now;
           else if (old.editedAt) out.editedAt = old.editedAt;
@@ -2337,7 +2383,7 @@ async function run() {
       // Already Received purchase edit hole purana batch muche notun kore banano hobe
       const oldPurchase = await purchaseCollection.findOne(query);
       if (Array.isArray(updatedData.returnHistory)) {
-        updatedData.returnHistory = stampReturns(updatedData.returnHistory, oldPurchase?.returnHistory);
+        updatedData.returnHistory = stampReturns(updatedData.returnHistory, oldPurchase?.returnHistory, true);
       }
       const wasReceived = oldPurchase?.receiveStatus === 'Received' || oldPurchase?.receiveStatus === 'Yes';
 
