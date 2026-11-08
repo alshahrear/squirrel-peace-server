@@ -68,7 +68,6 @@ async function run() {
     const userRoleCollection = client.db("squirrelDb").collection("userRole");
     const investmentCollection = client.db("squirrelDb").collection("investment");
     const adjustmentCollection = client.db("squirrelDb").collection("adjustment");
-    const headsCollection = client.db("squirrelDb").collection("heads");
     const incomeCollection = client.db("squirrelDb").collection("income");
     const expenseCollection = client.db("squirrelDb").collection("expense");
     const routeExpenseCollection = client.db("squirrelDb").collection("routeExpense");
@@ -84,6 +83,7 @@ async function run() {
     const damageReturnCollection = client.db("squirrelDb").collection('damageReturn');
     const PurchaseDuePaymentCollection = client.db("squirrelDb").collection('purchaseDuePayment');
     const SalesDuePaymentCollection = client.db("squirrelDb").collection('salesDuePayment');
+    const SalesSrTargetCollection = client.db("squirrelDb").collection('salesSrTarget');
 
 
     // jwt related api
@@ -538,51 +538,7 @@ async function run() {
 
 
 
-    // account heads related api
-
-    app.get('/account-heads', async (req, res) => {
-      const result = await headsCollection.find().sort({ _id: -1 }).toArray();
-      res.send(result);
-    });
-
-    app.post('/account-heads', async (req, res) => {
-      const item = req.body;
-      const result = await headsCollection.insertOne(item);
-      res.send(result);
-    });
-
-    app.put('/account-heads/:id', async (req, res) => {
-      try {
-        const { id } = req.params;
-        const { _id: _ignoreId, createdAt: _ignoreCreated, ...updatedData } = req.body;
-
-        const result = await headsCollection.updateOne(
-          { _id: new ObjectId(id) },
-          { $set: updatedData }
-        );
-
-        if (result.matchedCount === 0) {
-          return res.status(404).json({ error: 'Account head record not found' });
-        }
-
-        res.status(200).json({ message: 'Account head updated successfully' });
-      } catch (error) {
-        console.error('Error updating account head:', error);
-        res.status(500).json({ error: 'Internal Server Error' });
-      }
-    });
-
-    app.delete('/account-heads/:id', async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
-      const result = await headsCollection.deleteOne(query);
-      res.send(result);
-    });
-
-
-
     // income related api
-
 
     app.get('/income', async (req, res) => {
       const result = await incomeCollection.find().toArray();
@@ -1097,6 +1053,107 @@ async function run() {
       const query = { _id: new ObjectId(id) };
       const result = await SalesDuePaymentCollection.deleteOne(query);
       res.send(result);
+    });
+
+
+
+
+    // Sales SR Target related APIs
+
+    // Get all SR targets (newest first)
+    app.get('/sales-sr-target', async (req, res) => {
+      try {
+        const result = await SalesSrTargetCollection.find().sort({ _id: -1 }).toArray();
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: 'Failed to fetch SR targets' });
+      }
+    });
+
+    // Post a new SR target
+    app.post('/sales-sr-target', async (req, res) => {
+      try {
+        const item = req.body;
+        const amount = Math.round((Number(item.targetAmount) || 0) * 100) / 100;
+
+        if (!item.srId || !item.sr || !item.targetMonth || amount <= 0) {
+          return res.status(400).send({ message: 'SR, target month and target amount are required' });
+        }
+
+        const duplicate = await SalesSrTargetCollection.findOne({
+          srId: item.srId,
+          targetMonth: item.targetMonth,
+        });
+        if (duplicate) {
+          return res.status(400).send({ message: 'This SR already has a target for this month!' });
+        }
+
+        const doc = {
+          srId: item.srId,
+          sr: item.sr,
+          targetMonth: item.targetMonth, // YYYY-MM
+          targetAmount: amount,
+          note: item.note || '',
+          createdAt: item.createdAt || new Date().toLocaleString('en-GB', { timeZone: 'Asia/Dhaka' }),
+        };
+
+        const result = await SalesSrTargetCollection.insertOne(doc);
+        res.send(result);
+      } catch (error) {
+        console.error('Error adding SR target:', error);
+        res.status(500).send({ message: 'Failed to add SR target' });
+      }
+    });
+
+    // Update an SR target
+    app.put('/sales-sr-target/:id', async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { _id: _ignoreId, createdAt: _ignoreCreated, ...updatedData } = req.body;
+
+        const amount = Math.round((Number(updatedData.targetAmount) || 0) * 100) / 100;
+        if (!updatedData.srId || !updatedData.sr || !updatedData.targetMonth || amount <= 0) {
+          return res.status(400).send({ message: 'SR, target month and target amount are required' });
+        }
+
+        const duplicate = await SalesSrTargetCollection.findOne({
+          srId: updatedData.srId,
+          targetMonth: updatedData.targetMonth,
+          _id: { $ne: new ObjectId(id) },
+        });
+        if (duplicate) {
+          return res.status(400).send({ message: 'This SR already has a target for this month!' });
+        }
+
+        updatedData.targetAmount = amount;
+        updatedData.note = updatedData.note || '';
+
+        const result = await SalesSrTargetCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updatedData }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).send({ message: 'SR target not found' });
+        }
+
+        res.status(200).send({ message: 'SR target updated successfully' });
+      } catch (error) {
+        console.error('Error updating SR target:', error);
+        res.status(500).send({ message: 'Internal Server Error' });
+      }
+    });
+
+    // Delete an SR target
+    app.delete('/sales-sr-target/:id', async (req, res) => {
+      try {
+        const id = req.params.id;
+        const query = { _id: new ObjectId(id) };
+        const result = await SalesSrTargetCollection.deleteOne(query);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: 'Failed to delete SR target' });
+      }
     });
 
 
