@@ -13,9 +13,11 @@ initializeApp({
   credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)),
 });
 const port = process.env.PORT || 5000;
+process.on('unhandledRejection', (e) => console.error('unhandledRejection:', e));
+process.on('uncaughtException', (e) => console.error('uncaughtException:', e));
 
 // middleware
-app.set('trust proxy', true);
+app.set('trust proxy', 1);
 app.use(cors());
 app.use(express.json());
 
@@ -23,7 +25,7 @@ app.use(express.json());
 const versionCol = () => client.db("squirrelDb").collection("meta");
 app.use((req, res, next) => {
   if (req.method === 'GET') res.set('Cache-Control', 'no-store');
-  if (req.method !== 'GET' && req.method !== 'OPTIONS' && req.path !== '/jwt' && req.path !== '/client/login' && !req.path.startsWith('/gate')) {
+  if (req.method !== 'GET' && req.method !== 'OPTIONS' && req.path !== '/jwt' && req.path !== '/client/login' && req.path !== '/users/verify-admin-password' && !req.path.startsWith('/gate')) {
     res.on('finish', () => {
       if (res.statusCode < 400) {
         versionCol()
@@ -181,7 +183,7 @@ async function run() {
         if (!idToken || typeof idToken !== 'string') {
           return res.status(401).send({ message: 'unauthorized access' });
         }
-                const decodedFirebase = await getAuth().verifyIdToken(idToken);
+       const decodedFirebase = await getAuth().verifyIdToken(idToken, true);
         if (!decodedFirebase.email) {
           return res.status(401).send({ message: 'unauthorized access' });
         }
@@ -267,16 +269,21 @@ async function run() {
       res.send({ admin });
     })
 
-    app.post('/users', async (req, res) => {
-      const user = req.body;
-      // checking user already created or not
-      const query = { email: user.email }
-      const existingUser = await usersCollection.findOne(query);
-      if (existingUser) {
-        return res.send({ message: 'user already exists', insertedId: null })
+       app.post('/users', async (req, res) => {
+      try {
+        const idToken = (req.headers.authorization || '').split(' ')[1];
+        const decoded = await getAuth().verifyIdToken(idToken);
+        const email = decoded.email;
+        if (!email) return res.status(401).send({ message: 'unauthorized access' });
+        const existingUser = await usersCollection.findOne({ email });
+        if (existingUser) {
+          return res.send({ message: 'user already exists', insertedId: null })
+        }
+        const result = await usersCollection.insertOne({ name: String(req.body?.name || '').slice(0, 100), email, role: 'user' });
+        res.send(result);
+      } catch (e) {
+        res.status(401).send({ message: 'unauthorized access' });
       }
-      const result = await usersCollection.insertOne({ name: user.name, email: user.email, role: 'user' });
-      res.send(result);
     });
 
     const adminPassFails = new Map();
@@ -304,17 +311,57 @@ async function run() {
       return true;
     };
 
+    // ===== admin action token (password verify korar por 2 min er single-use token) =====
+    const ACTION_SECRET = process.env.ADMIN_ACTION_TOKEN_SECRET || process.env.ACCESS_TOKEN_SECRET;
+    const usedActionTokens = new Map(); // jti -> expiry(ms)
+    setInterval(() => {
+      const now = Date.now();
+      for (const [k, exp] of usedActionTokens) if (now > exp) usedActionTokens.delete(k);
+    }, 60 * 1000).unref();
+
+    // Step 1: password verify -> action token
+    app.post('/users/verify-admin-password', verifyToken, verifyAdmin, (req, res) => {
+      if (!checkAdminPassword(req, res)) return;
+      const jti = crypto.randomUUID();
+      const actionToken = jwt.sign(
+        { email: req.decoded.email, purpose: 'admin-action', jti },
+        ACTION_SECRET,
+        { expiresIn: '2m' }
+      );
+      res.send({ ok: true, actionToken });
+    });
+
+    // Step 2: action korar somoy token check (ekbar e use hobe)
+    const requireActionToken = (req, res) => {
+      const t = req.headers['x-action-token'];
+      if (!t || typeof t !== 'string') {
+        res.status(403).send({ message: 'Password verification required' });
+        return false;
+      }
+      try {
+        const d = jwt.verify(t, ACTION_SECRET);
+        if (d.purpose !== 'admin-action' || d.email !== req.decoded.email || usedActionTokens.has(d.jti)) {
+          throw new Error('invalid');
+        }
+        usedActionTokens.set(d.jti, d.exp * 1000);
+        return true;
+      } catch (e) {
+        res.status(403).send({ message: 'Verification expired, try again' });
+        return false;
+      }
+    };
+
     app.delete('/users/:id', verifyToken, verifyAdmin, async (req, res) => {
       const query = { _id: new ObjectId(req.params.id) };
       const target = await usersCollection.findOne(query);
       if (!target) return res.status(404).send({ message: 'User not found' });
-      if (target.role === 'admin' && !checkAdminPassword(req, res)) return;
+      if (target.role === 'admin' && !requireActionToken(req, res)) return;
       const result = await usersCollection.deleteOne(query);
       res.send(result);
     });
 
     app.patch('/users/admin/:id', verifyToken, verifyAdmin, async (req, res) => {
-      if (!checkAdminPassword(req, res)) return;
+      if (!requireActionToken(req, res)) return;
       const id = req.params.id;
       const filter = { _id: new ObjectId(id) };
       const updatedDoc = {
@@ -327,7 +374,7 @@ async function run() {
     })
 
     app.patch('/users/remove-admin/:id', verifyToken, verifyAdmin, async (req, res) => {
-      if (!checkAdminPassword(req, res)) return;
+      if (!requireActionToken(req, res)) return;
       const id = req.params.id;
       const filter = { _id: new ObjectId(id) };
       const updatedDoc = {
@@ -467,7 +514,7 @@ async function run() {
         const tokenPayload = { clientId: client._id, email: client.email };
         const token = jwt.sign(
           tokenPayload,
-          process.env.CLIENT_ACCESS_TOKEN_SECRET || 'client_secret_key_here',
+                    process.env.CLIENT_ACCESS_TOKEN_SECRET,
           { expiresIn: '7d' }
         );
 
