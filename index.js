@@ -4,11 +4,18 @@ const express = require('express');
 const app = express();
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
+const { initializeApp, cert } = require('firebase-admin/app');
+const { getAuth } = require('firebase-admin/auth');
 const { MongoClient, ServerApiVersion, ObjectId, } = require('mongodb');
 require('dotenv').config();
+initializeApp({
+  credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)),
+});
 const port = process.env.PORT || 5000;
 
 // middleware
+app.set('trust proxy', true);
 app.use(cors());
 app.use(express.json());
 
@@ -16,7 +23,7 @@ app.use(express.json());
 const versionCol = () => client.db("squirrelDb").collection("meta");
 app.use((req, res, next) => {
   if (req.method === 'GET') res.set('Cache-Control', 'no-store');
-  if (req.method !== 'GET' && req.method !== 'OPTIONS' && req.path !== '/jwt' && req.path !== '/client/login') {
+  if (req.method !== 'GET' && req.method !== 'OPTIONS' && req.path !== '/jwt' && req.path !== '/client/login' && !req.path.startsWith('/gate')) {
     res.on('finish', () => {
       if (res.statusCode < 400) {
         versionCol()
@@ -86,12 +93,103 @@ async function run() {
     const SalesSrTargetCollection = client.db("squirrelDb").collection('salesSrTarget');
 
 
+    // ===== secret gate (burger -> burger-sos -> password -> login) =====
+    const GATE_SECRET = process.env.GATE_TOKEN_SECRET || process.env.ACCESS_TOKEN_SECRET;
+    const gateStep1 = new Map(); // ip -> time
+    const gateStep2 = new Map(); // ip -> time
+    const gateFails = new Map(); // ip -> { count, lockUntil }
+    const GATE_STEP_WINDOW = 60 * 1000;
+    const GATE_MODAL_WINDOW = 2 * 60 * 1000;
+    const GATE_MAX_FAILS = 5;
+    const GATE_LOCK_TIME = 15 * 60 * 1000;
+
+    const getIp = (req) => req.ip || req.socket.remoteAddress || 'unknown';
+    const safeEqual = (a, b) => {
+      const ha = crypto.createHash('sha256').update(String(a)).digest();
+      const hb = crypto.createHash('sha256').update(String(b)).digest();
+      return crypto.timingSafeEqual(ha, hb);
+    };
+
+    setInterval(() => {
+      const now = Date.now();
+      for (const [k, t] of gateStep1) if (now - t > GATE_STEP_WINDOW) gateStep1.delete(k);
+      for (const [k, t] of gateStep2) if (now - t > GATE_MODAL_WINDOW) gateStep2.delete(k);
+      for (const [k, v] of gateFails) if (v.lockUntil && now > v.lockUntil) gateFails.delete(k);
+    }, 60 * 1000).unref();
+
+    app.post('/gate/step1', (req, res) => {
+      gateStep1.set(getIp(req), Date.now());
+      res.send({ ok: true });
+    });
+
+    app.post('/gate/step2', (req, res) => {
+      const ip = getIp(req);
+      const t = gateStep1.get(ip);
+      if (!t || Date.now() - t > GATE_STEP_WINDOW) {
+        return res.status(403).send({ ok: false });
+      }
+      gateStep1.delete(ip);
+      gateStep2.set(ip, Date.now());
+      res.send({ ok: true });
+    });
+
+    app.post('/gate/verify', (req, res) => {
+      const ip = getIp(req);
+      const fail = gateFails.get(ip);
+      if (fail && fail.lockUntil && Date.now() < fail.lockUntil) {
+        return res.status(429).send({ ok: false });
+      }
+
+      const t = gateStep2.get(ip);
+      if (!t || Date.now() - t > GATE_MODAL_WINDOW) {
+        return res.status(403).send({ ok: false });
+      }
+      gateStep2.delete(ip);
+
+      const secretPass = process.env.GATE_PASSWORD;
+      const input = req.body?.password;
+      if (!secretPass || typeof input !== 'string' || !safeEqual(input, secretPass)) {
+        const cur = gateFails.get(ip) || { count: 0, lockUntil: 0 };
+        cur.count += 1;
+        if (cur.count >= GATE_MAX_FAILS) {
+          cur.lockUntil = Date.now() + GATE_LOCK_TIME;
+          cur.count = 0;
+        }
+        gateFails.set(ip, cur);
+        return res.status(403).send({ ok: false });
+      }
+
+      gateFails.delete(ip);
+      const token = jwt.sign({ gate: true }, GATE_SECRET, { expiresIn: '30m' });
+      res.send({ ok: true, token });
+    });
+
+    app.post('/gate/check', (req, res) => {
+      const token = req.body?.token;
+      if (!token || typeof token !== 'string') return res.status(403).send({ ok: false });
+      jwt.verify(token, GATE_SECRET, (err, decoded) => {
+        if (err || !decoded?.gate) return res.status(403).send({ ok: false });
+        res.send({ ok: true });
+      });
+    });
+
     // jwt related api
 
     app.post('/jwt', async (req, res) => {
-      const user = req.body;
-      const token = jwt.sign(user, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '1h' });
-      res.send({ token });
+      try {
+        const idToken = req.body?.idToken;
+        if (!idToken || typeof idToken !== 'string') {
+          return res.status(401).send({ message: 'unauthorized access' });
+        }
+                const decodedFirebase = await getAuth().verifyIdToken(idToken);
+        if (!decodedFirebase.email) {
+          return res.status(401).send({ message: 'unauthorized access' });
+        }
+        const token = jwt.sign({ email: decodedFirebase.email }, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '1h' });
+        res.send({ token });
+      } catch (error) {
+        res.status(401).send({ message: 'unauthorized access' });
+      }
     })
 
     // middlewares 
@@ -148,7 +246,7 @@ async function run() {
 
     // users related api
 
-    app.get('/users', async (req, res) => {
+    app.get('/users', verifyToken, verifyAdmin, async (req, res) => {
       const result = await usersCollection.find().toArray();
       res.send(result);
     });
@@ -177,18 +275,46 @@ async function run() {
       if (existingUser) {
         return res.send({ message: 'user already exists', insertedId: null })
       }
-      const result = await usersCollection.insertOne(user);
+      const result = await usersCollection.insertOne({ name: user.name, email: user.email, role: 'user' });
       res.send(result);
     });
 
-    app.delete('/users/:id', async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
+    const adminPassFails = new Map();
+    const checkAdminPassword = (req, res) => {
+      const key = req.decoded.email;
+      const f = adminPassFails.get(key);
+      if (f && f.lockUntil && Date.now() < f.lockUntil) {
+        res.status(429).send({ message: 'Too many attempts' });
+        return false;
+      }
+      const input = req.body?.password;
+      const real = process.env.ADMIN_ACTION_PASSWORD;
+      if (!real || typeof input !== 'string' || !safeEqual(input, real)) {
+        const cur = f || { count: 0, lockUntil: 0 };
+        cur.count += 1;
+        if (cur.count >= 5) {
+          cur.lockUntil = Date.now() + 15 * 60 * 1000;
+          cur.count = 0;
+        }
+        adminPassFails.set(key, cur);
+        res.status(400).send({ message: 'Incorrect password' });
+        return false;
+      }
+      adminPassFails.delete(key);
+      return true;
+    };
+
+    app.delete('/users/:id', verifyToken, verifyAdmin, async (req, res) => {
+      const query = { _id: new ObjectId(req.params.id) };
+      const target = await usersCollection.findOne(query);
+      if (!target) return res.status(404).send({ message: 'User not found' });
+      if (target.role === 'admin' && !checkAdminPassword(req, res)) return;
       const result = await usersCollection.deleteOne(query);
       res.send(result);
     });
 
-    app.patch('/users/admin/:id', async (req, res) => {
+    app.patch('/users/admin/:id', verifyToken, verifyAdmin, async (req, res) => {
+      if (!checkAdminPassword(req, res)) return;
       const id = req.params.id;
       const filter = { _id: new ObjectId(id) };
       const updatedDoc = {
@@ -200,7 +326,8 @@ async function run() {
       res.send(result);
     })
 
-    app.patch('/users/remove-admin/:id', async (req, res) => {
+    app.patch('/users/remove-admin/:id', verifyToken, verifyAdmin, async (req, res) => {
+      if (!checkAdminPassword(req, res)) return;
       const id = req.params.id;
       const filter = { _id: new ObjectId(id) };
       const updatedDoc = {
