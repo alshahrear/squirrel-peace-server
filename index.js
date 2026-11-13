@@ -5,10 +5,51 @@ const app = express();
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
+const { AsyncLocalStorage } = require('async_hooks');
+const tenantStore = new AsyncLocalStorage();
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getAuth } = require('firebase-admin/auth');
 const { MongoClient, ServerApiVersion, ObjectId, } = require('mongodb');
 require('dotenv').config();
+const REQUIRED_ENV = [
+  'FIREBASE_SERVICE_ACCOUNT',
+  'DB_USER',
+  'DB_PASS',
+  'ACCESS_TOKEN_SECRET',
+  'CLIENT_ACCESS_TOKEN_SECRET',
+  'GATE_TOKEN_SECRET',
+  'ADMIN_ACTION_TOKEN_SECRET',
+  'GATE_PASSWORD',
+  'ADMIN_ACTION_PASSWORD',
+];
+const missingEnv = REQUIRED_ENV.filter((k) => !process.env[k]);
+if (missingEnv.length > 0) {
+  console.error('.env তে এই ভ্যালুগুলো নেই:', missingEnv.join(', '));
+  process.exit(1);
+}
+const secretValues = [
+  process.env.ACCESS_TOKEN_SECRET,
+  process.env.CLIENT_ACCESS_TOKEN_SECRET,
+  process.env.GATE_TOKEN_SECRET,
+  process.env.ADMIN_ACTION_TOKEN_SECRET,
+];
+if (new Set(secretValues).size !== secretValues.length) {
+  console.error('চারটা secret (ACCESS, CLIENT_ACCESS, GATE_TOKEN, ADMIN_ACTION_TOKEN) আলাদা আলাদা হতে হবে!');
+  process.exit(1);
+}
+// লাইভ সার্ভারে (NODE_ENV=production) দুর্বল secret/password হলে চালুই হবে না
+const IS_PROD = process.env.NODE_ENV === 'production';
+const weakSecret = secretValues.some((s) => String(s).length < 48);
+const weakPass = [process.env.GATE_PASSWORD, process.env.ADMIN_ACTION_PASSWORD].some((s) => String(s).length < 10);
+if (weakSecret || weakPass) {
+  if (IS_PROD) {
+    console.error('Production এ secret কমপক্ষে ৪৮ অক্ষর এবং GATE_PASSWORD / ADMIN_ACTION_PASSWORD কমপক্ষে ১০ অক্ষর হতে হবে!');
+    process.exit(1);
+  }
+  console.warn('⚠️ দুর্বল secret/password (লোকালে চলবে, কিন্তু লাইভে চলবে না)');
+}
 initializeApp({
   credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)),
 });
@@ -18,17 +59,127 @@ process.on('uncaughtException', (e) => console.error('uncaughtException:', e));
 
 // middleware
 app.set('trust proxy', 1);
-app.use(cors());
-app.use(express.json());
+
+// সব route এর async error নিজে ধরবে (ভুল ID দিলে request ঝুলে না থেকে error response যাবে)
+['get', 'post', 'put', 'patch', 'delete'].forEach((m) => {
+  const orig = app[m].bind(app);
+  app[m] = (path, ...handlers) => {
+    if (handlers.length === 0) return orig(path); // app.get('setting') এর জন্য
+    return orig(
+      path,
+      ...handlers.map((h) =>
+        typeof h === 'function'
+          ? (req, res, next) => {
+            try {
+              const r = h(req, res, next);
+              if (r && typeof r.catch === 'function') r.catch(next);
+            } catch (e) {
+              next(e);
+            }
+          }
+          : h
+      )
+    );
+  };
+});
+const ORIGIN_PATTERNS = [
+  /^https:\/\/([a-z0-9-]+\.)?bashaybazar\.com$/,
+];
+if (!IS_PROD) {
+  ORIGIN_PATTERNS.push(
+    /^https?:\/\/([a-z0-9-]+\.)?localhost(:\d+)?$/,
+    /^http:\/\/127\.0\.0\.1(:\d+)?$/
+  );
+}
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true);
+      const extra = (process.env.CORS_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean);
+      if (extra.includes(origin) || ORIGIN_PATTERNS.some((r) => r.test(origin))) return cb(null, true);
+      cb(null, false);
+    },
+  })
+);
+app.use(express.json({ limit: '1mb' }));
+
+// body তে '$' দিয়ে শুরু বা '.' যুক্ত key থাকলে বাতিল (NoSQL injection / অন্য field overwrite ঠেকাতে)
+const hasBadKey = (v, depth = 0) => {
+  if (depth > 12) return true;
+  if (Array.isArray(v)) return v.some((x) => hasBadKey(x, depth + 1));
+  if (v && typeof v === 'object') {
+    return Object.keys(v).some((k) => k.startsWith('$') || k.includes('.') || hasBadKey(v[k], depth + 1));
+  }
+  return false;
+};
+app.use((req, res, next) => {
+  if (req.body && hasBadKey(req.body)) return res.status(400).send({ message: 'Invalid data' });
+  next();
+});
+
+// unsetFields থেকে স্পর্শকাতর field বাদ
+const BLOCKED_UNSET = ['_id', 'createdAt', 'stockAllocations', 'stockCreated', 'orderSnapshot', 'invoiceNo', 'orderNo'];
+const cleanUnset = (list) =>
+  Array.isArray(list)
+    ? list.filter((f) => typeof f === 'string' && !f.startsWith('$') && !f.includes('.') && !BLOCKED_UNSET.includes(f))
+    : list;
+
+// ===== security headers + rate limit =====
+app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
+const mkLimiter = (windowMs, limit, message) =>
+  rateLimit({ windowMs, limit, standardHeaders: true, legacyHeaders: false, message: { message } });
+app.use(mkLimiter(60 * 1000, 6000, 'Too many requests, please slow down.'));
+app.use('/client/login', mkLimiter(15 * 60 * 1000, 30, 'Too many login attempts. Try again later.'));
+app.use('/client/change-password', mkLimiter(15 * 60 * 1000, 20, 'Too many attempts. Try again later.'));
+app.use('/jwt', mkLimiter(15 * 60 * 1000, 60, 'Too many attempts. Try again later.'));
+app.use('/gate', mkLimiter(15 * 60 * 1000, 60, 'Too many attempts. Try again later.'));
+app.use('/users/verify-admin-password', mkLimiter(15 * 60 * 1000, 20, 'Too many attempts. Try again later.'));
 
 // data change track (sob device er jonno)
-const versionCol = () => client.db("squirrelDb").collection("meta");
+const CI_OPT = { collation: { locale: 'en', strength: 2 } };
+
+// dealer এর staff (SR / Manager / Delivery Man) এর session যাচাই (dealer active + staff active + session মিলতে হবে)
+const loadStaff = async (c, d) => {
+  if (!c || c.isActive !== true || !c.dbName) return null;
+  if (!d?.staffId || !ObjectId.isValid(d.staffId)) return null;
+  const s = await client.db(c.dbName).collection('user').findOne({ _id: new ObjectId(d.staffId) });
+  if (!s || s.isActive !== true || !s.sessionId || s.sessionId !== d.sid) return null;
+  return s;
+};
+
+// token দেখে কে এসেছে: client (নিজের database সহ) না admin
+const resolveCaller = async (req) => {
+  const token = (req.headers.authorization || '').split(' ')[1];
+  if (!token) return null;
+  const control = client.db("squirrelDb");
+  try {
+    const d = jwt.verify(token, process.env.CLIENT_ACCESS_TOKEN_SECRET, { algorithms: ['HS256'] });
+    if (d?.clientId && ObjectId.isValid(d.clientId)) {
+      const c = await control.collection('client').findOne({ _id: new ObjectId(d.clientId) });
+      if (d.kind === 'staff') {
+        const s = await loadStaff(c, d);
+        if (s) return { type: 'client', client: c, dbName: c.dbName, staff: s };
+        return null;
+      }
+      if (c && c.isActive === true && c.login === 'yes' && c.sessionId && c.sessionId === d.sid && c.dbName && !d.staffId) {
+        return { type: 'client', client: c, dbName: c.dbName };
+      }
+    }
+  } catch (e) { }
+  try {
+    const d = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, { algorithms: ['HS256'] });
+    const u = await control.collection('users').findOne({ email: d.email }, CI_OPT);
+    if (u?.role === 'admin') return { type: 'admin', decoded: d };
+  } catch (e) { }
+  return null;
+};
 app.use((req, res, next) => {
   if (req.method === 'GET') res.set('Cache-Control', 'no-store');
-  if (req.method !== 'GET' && req.method !== 'OPTIONS' && req.path !== '/jwt' && req.path !== '/client/login' && req.path !== '/users/verify-admin-password' && !req.path.startsWith('/gate')) {
+  if (req.method !== 'GET' && req.method !== 'OPTIONS' && req.path !== '/jwt' && req.path !== '/client/login' && req.path !== '/client/logout' && req.path !== '/users/verify-admin-password' && !req.path.startsWith('/gate')) {
     res.on('finish', () => {
       if (res.statusCode < 400) {
-        versionCol()
+        if (req.versionDb) client.db(req.versionDb).collection('auditLog').insertOne({ at: new Date(), by: req.staff ? { type: 'staff', id: String(req.staff._id), name: req.staff.name, role: req.staff.role } : { type: 'dealer', id: String(req.client?._id || '') }, method: req.method, path: String(req.originalUrl || '').split('?')[0], ip: req.ip }).catch(() => { });
+        client.db(req.versionDb || "squirrelDb").collection("meta")
           .updateOne({ _id: 'dataVersion' }, { $inc: { version: 1 } }, { upsert: true })
           .catch(() => { });
       }
@@ -39,7 +190,10 @@ app.use((req, res, next) => {
 app.get('/data-version', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   try {
-    const doc = await versionCol().findOne({ _id: 'dataVersion' });
+    const who = await resolveCaller(req);
+    if (!who) return res.send({ version: 0 });
+    const dbName = who.type === 'client' ? who.dbName : 'squirrelDb';
+    const doc = await client.db(dbName).collection('meta').findOne({ _id: 'dataVersion' });
     res.send({ version: doc?.version || 0 });
   } catch (e) {
     res.status(500).send({ error: 'version failed' });
@@ -47,7 +201,7 @@ app.get('/data-version', async (req, res) => {
 });
 
 
-const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.3wtib.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
+const uri = `mongodb+srv://${encodeURIComponent(process.env.DB_USER)}:${encodeURIComponent(process.env.DB_PASS)}@cluster0.3wtib.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
 
 // Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(uri, {
@@ -64,48 +218,80 @@ async function run() {
     await client.connect();
     // Send a ping to confirm a successful connection
 
-    const usersCollection = client.db("squirrelDb").collection("users");
-    const contactCollection = client.db("squirrelDb").collection("contact");
-    const productCollection = client.db("squirrelDb").collection("product");
-    const unitCollection = client.db("squirrelDb").collection("unit");
-    const categoryCollection = client.db("squirrelDb").collection("category");
-    const companyCollection = client.db("squirrelDb").collection("company");
-    const customerCollection = client.db("squirrelDb").collection("customer");
-    const routeCollection = client.db("squirrelDb").collection("route");
-    const clientCollection = client.db("squirrelDb").collection("client");
-    const userCollection = client.db("squirrelDb").collection("user");
-    const userRoleCollection = client.db("squirrelDb").collection("userRole");
-    const investmentCollection = client.db("squirrelDb").collection("investment");
-    const adjustmentCollection = client.db("squirrelDb").collection("adjustment");
-    const incomeCollection = client.db("squirrelDb").collection("income");
-    const expenseCollection = client.db("squirrelDb").collection("expense");
-    const routeExpenseCollection = client.db("squirrelDb").collection("routeExpense");
-    const transferCollection = client.db("squirrelDb").collection("transfer");
-    const purchaseCollection = client.db("squirrelDb").collection("purchase");
-    const stockPurchaseCollection = client.db("squirrelDb").collection("stock-purchase");
-    const stockAdjustmentCollection = client.db("squirrelDb").collection("stockAdjustment");
-    const salesCollection = client.db("squirrelDb").collection("sales");
-    const featureCollection = client.db("squirrelDb").collection("feature");
-    const purchaseBulkReturnCollection = client.db("squirrelDb").collection("purchaseBulkReturn");
-    const salesBulkReturnCollection = client.db("squirrelDb").collection("salesBulkReturn");
-    const salesDamageCollection = client.db("squirrelDb").collection('salesDamage');
-    const damageReturnCollection = client.db("squirrelDb").collection('damageReturn');
-    const PurchaseDuePaymentCollection = client.db("squirrelDb").collection('purchaseDuePayment');
-    const SalesDuePaymentCollection = client.db("squirrelDb").collection('salesDuePayment');
-    const SalesSrTargetCollection = client.db("squirrelDb").collection('salesSrTarget');
+    // ===== control database (শুধু তোমার): admin, client তালিকা, website contact =====
+    const controlDb = client.db("squirrelDb");
+    const usersCollection = controlDb.collection("users");
+    const clientCollection = controlDb.collection("client");
+    const contactCollection = controlDb.collection("contact");
+
+    // ===== client এর business data: প্রতি request এ token অনুযায়ী নিজের আলাদা database =====
+    // tenant না পেলে error দেয় (কখনো অন্যের data খোলে না)
+    // কোন method এ options কত নম্বর argument (transaction session ঢোকানোর জন্য)
+    const SESSION_ARG = {
+      find: 1, findOne: 1, countDocuments: 1, aggregate: 1,
+      insertOne: 1, insertMany: 1, deleteOne: 1, deleteMany: 1, findOneAndDelete: 1,
+      updateOne: 2, updateMany: 2, replaceOne: 2, findOneAndUpdate: 2, findOneAndReplace: 2, distinct: 2,
+    };
+    const tenantCol = (name) =>
+      new Proxy({}, {
+        get(_t, prop) {
+          if (typeof prop === 'symbol' || prop === 'then') return undefined;
+          const store = tenantStore.getStore();
+          if (!store || !store.dbName) throw new Error('TENANT_NOT_SET');
+          const col = client.db(store.dbName).collection(name);
+          const v = col[prop];
+          if (typeof v !== 'function') return v;
+          const idx = SESSION_ARG[prop];
+          if (idx === undefined) return v.bind(col);
+          return (...args) => {
+            if (store.session) args[idx] = { ...(args[idx] || {}), session: store.session };
+            return v.apply(col, args);
+          };
+        },
+      });
+
+    const productCollection = tenantCol("product");
+    const unitCollection = tenantCol("unit");
+    const categoryCollection = tenantCol("category");
+    const companyCollection = tenantCol("company");
+    const customerCollection = tenantCol("customer");
+    const routeCollection = tenantCol("route");
+    const userCollection = tenantCol("user");
+    const userRoleCollection = tenantCol("userRole");
+    const investmentCollection = tenantCol("investment");
+    const adjustmentCollection = tenantCol("adjustment");
+    const incomeCollection = tenantCol("income");
+    const expenseCollection = tenantCol("expense");
+    const routeExpenseCollection = tenantCol("routeExpense");
+    const transferCollection = tenantCol("transfer");
+    const purchaseCollection = tenantCol("purchase");
+    const stockPurchaseCollection = tenantCol("stock-purchase");
+    const stockAdjustmentCollection = tenantCol("stockAdjustment");
+    const salesCollection = tenantCol("sales");
+    const featureCollection = tenantCol("feature");
+    const purchaseBulkReturnCollection = tenantCol("purchaseBulkReturn");
+    const salesBulkReturnCollection = tenantCol("salesBulkReturn");
+    const salesDamageCollection = tenantCol("salesDamage");
+    const damageReturnCollection = tenantCol("damageReturn");
+    const PurchaseDuePaymentCollection = tenantCol("purchaseDuePayment");
+    const SalesDuePaymentCollection = tenantCol("salesDuePayment");
+    const SalesSrTargetCollection = tenantCol("salesSrTarget");
 
 
     // ===== secret gate (burger -> burger-sos -> password -> login) =====
-    const GATE_SECRET = process.env.GATE_TOKEN_SECRET || process.env.ACCESS_TOKEN_SECRET;
+    const GATE_SECRET = process.env.GATE_TOKEN_SECRET;
     const gateStep1 = new Map(); // ip -> time
     const gateStep2 = new Map(); // ip -> time
     const gateFails = new Map(); // ip -> { count, lockUntil }
-    const GATE_STEP_WINDOW = 60 * 1000;
-    const GATE_MODAL_WINDOW = 2 * 60 * 1000;
+    const GATE_STEP_WINDOW = 10 * 60 * 1000;
+    const GATE_MODAL_WINDOW = 5 * 60 * 1000;
     const GATE_MAX_FAILS = 5;
     const GATE_LOCK_TIME = 15 * 60 * 1000;
 
-    const getIp = (req) => req.ip || req.socket.remoteAddress || 'unknown';
+    const getIp = (req) => {
+      const raw = req.ip || req.socket.remoteAddress || 'unknown';
+      return String(raw).replace(/^::ffff:/, '').replace(/^::1$/, '127.0.0.1');
+    };
     const safeEqual = (a, b) => {
       const ha = crypto.createHash('sha256').update(String(a)).digest();
       const hb = crypto.createHash('sha256').update(String(b)).digest();
@@ -169,7 +355,7 @@ async function run() {
     app.post('/gate/check', (req, res) => {
       const token = req.body?.token;
       if (!token || typeof token !== 'string') return res.status(403).send({ ok: false });
-      jwt.verify(token, GATE_SECRET, (err, decoded) => {
+      jwt.verify(token, GATE_SECRET, { algorithms: ['HS256'] }, (err, decoded) => {
         if (err || !decoded?.gate) return res.status(403).send({ ok: false });
         res.send({ ok: true });
       });
@@ -183,13 +369,14 @@ async function run() {
         if (!idToken || typeof idToken !== 'string') {
           return res.status(401).send({ message: 'unauthorized access' });
         }
-       const decodedFirebase = await getAuth().verifyIdToken(idToken, true);
+        const decodedFirebase = await getAuth().verifyIdToken(idToken);
         if (!decodedFirebase.email) {
           return res.status(401).send({ message: 'unauthorized access' });
         }
         const token = jwt.sign({ email: decodedFirebase.email }, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '1h' });
         res.send({ token });
       } catch (error) {
+        console.error('JWT ERROR:', error.code, error.message);
         res.status(401).send({ message: 'unauthorized access' });
       }
     })
@@ -201,7 +388,7 @@ async function run() {
         return res.status(401).send({ message: 'unauthorized access' });
       }
       const token = req.headers.authorization.split(' ')[1];
-      jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
+      jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, { algorithms: ['HS256'] }, (err, decoded) => {
         if (err) {
           return res.status(401).send({ message: 'unauthorized access' })
         }
@@ -213,8 +400,10 @@ async function run() {
     // use verify admin after verifyToken
     const verifyAdmin = async (req, res, next) => {
       const email = req.decoded.email;
-      const query = { email: email };
-      const user = await usersCollection.findOne(query);
+      const user = await usersCollection.findOne(
+        { email },
+        { collation: { locale: 'en', strength: 2 } }
+      );
       const isAdmin = user?.role === 'admin';
       if (!isAdmin) {
         return res.status(403).send({ message: 'forbidden access' });
@@ -256,12 +445,14 @@ async function run() {
     app.get('/users/admin/:email', verifyToken, async (req, res) => {
       const email = req.params.email;
 
-      if (email !== req.decoded.email) {
+      if (String(email).toLowerCase() !== String(req.decoded.email).toLowerCase()) {
         return res.status(403).send({ message: 'forbidden access' })
       }
 
-      const query = { email: email };
-      const user = await usersCollection.findOne(query);
+      const user = await usersCollection.findOne(
+        { email: req.decoded.email },
+        { collation: { locale: 'en', strength: 2 } }
+      );
       let admin = false;
       if (user) {
         admin = user?.role === 'admin';
@@ -269,9 +460,15 @@ async function run() {
       res.send({ admin });
     })
 
-       app.post('/users', async (req, res) => {
+    app.post('/users', async (req, res) => {
       try {
         const idToken = (req.headers.authorization || '').split(' ')[1];
+        try {
+          const g = jwt.verify(String(req.headers['x-gate-token'] || ''), GATE_SECRET, { algorithms: ['HS256'] });
+          if (!g?.gate) throw new Error('no gate');
+        } catch (e) {
+          return res.status(403).send({ message: 'forbidden access' });
+        }
         const decoded = await getAuth().verifyIdToken(idToken);
         const email = decoded.email;
         if (!email) return res.status(401).send({ message: 'unauthorized access' });
@@ -312,7 +509,7 @@ async function run() {
     };
 
     // ===== admin action token (password verify korar por 2 min er single-use token) =====
-    const ACTION_SECRET = process.env.ADMIN_ACTION_TOKEN_SECRET || process.env.ACCESS_TOKEN_SECRET;
+    const ACTION_SECRET = process.env.ADMIN_ACTION_TOKEN_SECRET;
     const usedActionTokens = new Map(); // jti -> expiry(ms)
     setInterval(() => {
       const now = Date.now();
@@ -339,7 +536,7 @@ async function run() {
         return false;
       }
       try {
-        const d = jwt.verify(t, ACTION_SECRET);
+        const d = jwt.verify(t, ACTION_SECRET, { algorithms: ['HS256'] });
         if (d.purpose !== 'admin-action' || d.email !== req.decoded.email || usedActionTokens.has(d.jti)) {
           throw new Error('invalid');
         }
@@ -391,94 +588,222 @@ async function run() {
 
     // client related api
 
-    app.get('/client', async (req, res) => {
+    // ===== client password security (scrypt hash, plain password kothao save hobe na) =====
+    const scryptAsync = require('util').promisify(crypto.scrypt);
+    const CI = { collation: { locale: 'en', strength: 2 } };
+
+    const hashPassword = async (plain) => {
+      const salt = crypto.randomBytes(16);
+      const hash = await scryptAsync(String(plain), salt, 64);
+      return `scrypt$${salt.toString('hex')}$${hash.toString('hex')}`;
+    };
+
+    const verifyPasswordHash = async (plain, stored) => {
+      try {
+        const [algo, saltHex, hashHex] = String(stored).split('$');
+        if (algo !== 'scrypt' || !saltHex || !hashHex) return false;
+        const expected = Buffer.from(hashHex, 'hex');
+        const actual = await scryptAsync(String(plain), Buffer.from(saltHex, 'hex'), expected.length);
+        return crypto.timingSafeEqual(expected, actual);
+      } catch (e) {
+        return false;
+      }
+    };
+
+    const PASSWORD_RULE = /^(?=.*[A-Za-z])(?=.*\d).{8,128}$/;
+    const PASSWORD_MESSAGE = 'Password must be 8-128 characters and include letters and numbers';
+
+    // ===== subdomain (slug) =====
+    const SLUG_RULE = /^[a-z0-9][a-z0-9-]{1,28}[a-z0-9]$/;
+    const SLUG_MESSAGE = 'Subdomain must be 3-30 characters: small letters, numbers and hyphen only';
+    const RESERVED_SLUGS = ['www', 'api', 'admin', 'app', 'mail', 'ftp', 'smtp', 'static', 'assets', 'cdn', 'staging', 'dev', 'login', 'dashboard', 'panel', 'burger', 'support', 'help', 'blog', 'shop'];
+    const isValidSlug = (s) => SLUG_RULE.test(s) && !RESERVED_SLUGS.includes(s);
+    // database নাম unique (delete করা client এর slug নতুন কেউ নিলেও পুরোনো data পাবে না)
+    const makeDbName = (slug) => `tenant_${slug}_${crypto.randomBytes(3).toString('hex')}`;
+
+    // frontend e kokhono password / hash pathano hobe na
+    const parseUserLimit = (v) => {
+      const n = Number(v);
+      return Number.isInteger(n) && n >= 1 && n <= 1000 ? n : null;
+    };
+    const cleanWhatsapp = (v) => String(v || '').replace(/\D/g, '').slice(0, 20);
+    // staff সংখ্যা + dealer ১ জন > userLimit হলে limitExceeded
+    const getLimitInfo = async (c) => {
+      const limit = Number.isInteger(c.userLimit) && c.userLimit >= 1 ? c.userLimit : 10;
+      const staffCount = await client.db(c.dbName).collection('user').countDocuments({});
+      const excess = Math.max(staffCount + 1 - limit, 0);
+      return { userLimit: limit, staffCount, excess, limitExceeded: excess > 0 };
+    };
+    const publicClient = (c) => {
+      const { password, passwordHash, sessionId, dbName, ...rest } = c;
+      return { ...rest, login: rest.login || 'no', userLimit: Number.isInteger(rest.userLimit) && rest.userLimit >= 1 ? rest.userLimit : 10 };
+    };
+
+    app.get('/client', verifyToken, verifyAdmin, async (req, res) => {
       const clients = await clientCollection.find().toArray();
-      // পুরনো ডাটাগুলোতে login ফিল্ড না থাকলে ডিফল্টভাবে 'no' সেট করে পাঠানো
-      const result = clients.map(client => ({
-        ...client,
-        login: client.login || 'no'
-      }));
-      res.send(result);
+      res.send(clients.map(publicClient));
     });
 
     // নতুন ক্লায়েন্ট যোগ করার রাউট
-    app.post('/client', async (req, res) => {
-      const newClient = {
-        ...req.body,
-        login: req.body.login || 'no'
-      };
+    app.post('/client', verifyToken, verifyAdmin, async (req, res) => {
+      try {
+        const body = req.body || {};
+        const name = String(body.name || '').trim().slice(0, 100);
+        const phone = String(body.phone || '').replace(/\D/g, '').slice(0, 20);
+        const email = String(body.email || '').trim().toLowerCase().slice(0, 150);
+        const address = String(body.address || '').trim().slice(0, 300);
+        const password = String(body.password || '');
 
-      // ফোন অথবা ইমেইল অলরেডি আছে কিনা চেক করা
-      const existingClient = await clientCollection.findOne({
-        $or: [{ phone: newClient.phone }, { email: newClient.email }]
-      });
+        if (!name || !phone || !email || !address) {
+          return res.status(400).json({ message: 'All fields are required!' });
+        }
+        if (parseUserLimit(body.userLimit) === null) {
+          return res.status(400).json({ error: true, field: 'userLimit', message: 'User limit must be a whole number (minimum 1)' });
+        }
+        if (!PASSWORD_RULE.test(password)) {
+          return res.status(400).json({ message: PASSWORD_MESSAGE });
+        }
+        const slug = String(body.slug || '').trim().toLowerCase();
+        if (!isValidSlug(slug)) {
+          return res.status(400).json({ error: true, field: 'slug', message: SLUG_MESSAGE });
+        }
 
-      if (existingClient) {
-        let field = existingClient.phone === newClient.phone ? 'phone' : 'email';
-        return res.status(400).json({
-          error: true,
-          field: field,
-          message: `This ${field} is already registered!`
+        const existingClient = await clientCollection.findOne(
+          { $or: [{ phone }, { email }, { slug }] },
+          CI
+        );
+        if (existingClient) {
+          const field = existingClient.phone === phone ? 'phone' : existingClient.email === email ? 'email' : 'slug';
+          return res.status(400).json({
+            error: true,
+            field,
+            message: `This ${field} is already registered!`
+          });
+        }
+
+        const result = await clientCollection.insertOne({
+          name,
+          phone,
+          email,
+          address,
+          isActive: body.isActive === true,
+          slug,
+          dbName: makeDbName(slug),
+          whatsapp: cleanWhatsapp(body.whatsapp),
+          userLimit: parseUserLimit(body.userLimit),
+          passwordHash: await hashPassword(password),
+          login: 'no',
+          createdAt: new Date()
         });
+        res.send({ acknowledged: true, insertedId: result.insertedId });
+      } catch (error) {
+        console.error('Error adding client:', error);
+        res.status(500).json({ message: 'Failed to add client' });
       }
-
-      const result = await clientCollection.insertOne(newClient);
-      res.send(result);
     });
 
     // ক্লায়েন্ট আপডেট করার রাউট
-    app.put('/client/:id', async (req, res) => {
-      const id = req.params.id;
-      const updatedClient = req.body;
+    app.put('/client/:id', verifyToken, verifyAdmin, async (req, res) => {
+      try {
+        const id = req.params.id;
+        if (!ObjectId.isValid(id)) return res.status(404).json({ message: 'Client not found' });
 
-      // অন্য কোনো ইউজারের সাথে ফোন বা ইমেইল মিলে যায় কি না চেক করা
-      const existingClient = await clientCollection.findOne({
-        _id: { $ne: new ObjectId(id) },
-        $or: [{ phone: updatedClient.phone }, { email: updatedClient.email }]
-      });
+        const body = req.body || {};
+        const name = String(body.name || '').trim().slice(0, 100);
+        const phone = String(body.phone || '').replace(/\D/g, '').slice(0, 20);
+        const email = String(body.email || '').trim().toLowerCase().slice(0, 150);
+        const address = String(body.address || '').trim().slice(0, 300);
+        const password = String(body.password || '');
 
-      if (existingClient) {
-        let field = existingClient.phone === updatedClient.phone ? 'phone' : 'email';
-        return res.status(400).json({
-          error: true,
-          field: field,
-          message: `This ${field} is already used by another client!`
-        });
-      }
-
-      const filter = { _id: new ObjectId(id) };
-      const updateDoc = {
-        $set: {
-          name: updatedClient.name,
-          phone: updatedClient.phone,
-          email: updatedClient.email,
-          password: updatedClient.password,
-          address: updatedClient.address,
-          isActive: updatedClient.isActive,
-          login: updatedClient.login || 'no'
+        if (!name || !phone || !email || !address) {
+          return res.status(400).json({ message: 'All fields are required!' });
         }
-      };
-      const result = await clientCollection.updateOne(filter, updateDoc);
-      res.send(result);
+        if (parseUserLimit(body.userLimit) === null) {
+          return res.status(400).json({ error: true, field: 'userLimit', message: 'User limit must be a whole number (minimum 1)' });
+        }
+        if (password && !PASSWORD_RULE.test(password)) {
+          return res.status(400).json({ message: PASSWORD_MESSAGE });
+        }
+
+        const existingClient = await clientCollection.findOne(
+          { _id: { $ne: new ObjectId(id) }, $or: [{ phone }, { email }] },
+          CI
+        );
+        if (existingClient) {
+          const field = existingClient.phone === phone ? 'phone' : 'email';
+          return res.status(400).json({
+            error: true,
+            field,
+            message: `This ${field} is already used by another client!`
+          });
+        }
+
+        const current = await clientCollection.findOne({ _id: new ObjectId(id) });
+        if (!current) return res.status(404).json({ message: 'Client not found' });
+
+        const setDoc = { name, phone, email, address, isActive: body.isActive === true, whatsapp: cleanWhatsapp(body.whatsapp), userLimit: parseUserLimit(body.userLimit) };
+
+        // slug/database একবার ঠিক হলে আর বদলানো যাবে না (data হারানো ঠেকাতে)
+        if (!current.slug) {
+          const slug = String(body.slug || '').trim().toLowerCase();
+          if (!isValidSlug(slug)) {
+            return res.status(400).json({ error: true, field: 'slug', message: SLUG_MESSAGE });
+          }
+          const slugTaken = await clientCollection.findOne({ slug, _id: { $ne: current._id } });
+          if (slugTaken) {
+            return res.status(400).json({ error: true, field: 'slug', message: 'This subdomain is already taken!' });
+          }
+          setDoc.slug = slug;
+          setDoc.dbName = makeDbName(slug);
+        }
+        const updateDoc = { $set: setDoc };
+
+        // password blank thakle purano password ei thakbe; notun dile hash hobe ar client force logout hobe
+        const unsetDoc = {};
+        if (password) {
+          setDoc.passwordHash = await hashPassword(password);
+          setDoc.login = 'no';
+          unsetDoc.password = '';
+          unsetDoc.sessionId = '';
+        }
+        // inactive korle sathe sathe logout
+        if (!setDoc.isActive) {
+          setDoc.login = 'no';
+          unsetDoc.sessionId = '';
+        }
+        if (Object.keys(unsetDoc).length > 0) updateDoc.$unset = unsetDoc;
+
+        const result = await clientCollection.updateOne({ _id: new ObjectId(id) }, updateDoc);
+        res.send(result);
+      } catch (error) {
+        console.error('Error updating client:', error);
+        res.status(500).json({ message: 'Failed to update client' });
+      }
     });
 
     // ৪. ক্লায়েন্ট ডিলিট করার জন্য
-    app.delete('/client/:id', async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
-      const result = await clientCollection.deleteOne(query);
-      res.send(result);
+    app.delete('/client/:id', verifyToken, verifyAdmin, async (req, res) => {
+      try {
+        const id = req.params.id;
+        if (!ObjectId.isValid(id)) return res.status(404).json({ message: 'Client not found' });
+        if (!requireActionToken(req, res)) return;
+        const result = await clientCollection.deleteOne({ _id: new ObjectId(id) });
+        res.send(result);
+      } catch (error) {
+        console.error('Error deleting client:', error);
+        res.status(500).json({ message: 'Failed to delete client' });
+      }
     });
 
     // ক্লায়েন্টের লগইন স্ট্যাটাস আপডেট বা ফোর্সড লগআউট করার জন্য PATCH রুট
-    app.patch('/client/login-status/:id', async (req, res) => {
+    app.patch('/client/login-status/:id', verifyToken, verifyAdmin, async (req, res) => {
       try {
         const { id } = req.params;
         const { login } = req.body; // 'yes' বা 'no'
 
         const result = await clientCollection.updateOne(
           { _id: new ObjectId(id) },
-          { $set: { login: login } }
+          { $set: { login: 'no' }, $unset: { sessionId: '' } }
         );
 
         res.send(result);
@@ -490,32 +815,298 @@ async function run() {
     // ==========================================
     // নতুন যোগ করা: ক্লায়েন্ট লগইন এপিআই
     // ==========================================
+    // ----- client login brute force protection -----
+    const clientLoginFails = new Map(); // ip|email -> { count, lockUntil }
+    const CLIENT_MAX_FAILS = 5;
+    const CLIENT_LOCK_TIME = 15 * 60 * 1000;
+    setInterval(() => {
+      const now = Date.now();
+      for (const [k, v] of clientLoginFails) if (v.lockUntil && now > v.lockUntil) clientLoginFails.delete(k);
+    }, 60 * 1000).unref();
+    const dummyHashPromise = hashPassword(crypto.randomBytes(8).toString('hex'));
+
+    // ----- client token verify (inactive / force logout hole token sathe sathe bondho) -----
+    const verifyClientToken = async (req, res, next) => {
+      try {
+        const token = (req.headers.authorization || '').split(' ')[1];
+        if (!token) return res.status(401).send({ message: 'unauthorized access' });
+        const decoded = jwt.verify(token, process.env.CLIENT_ACCESS_TOKEN_SECRET, { algorithms: ['HS256'] });
+        if (!decoded?.clientId || !ObjectId.isValid(decoded.clientId)) {
+          return res.status(401).send({ message: 'unauthorized access' });
+        }
+        const c = await clientCollection.findOne({ _id: new ObjectId(decoded.clientId) });
+        if (decoded.kind === 'staff') {
+          const s = await loadStaff(c, decoded);
+          if (!s) return res.status(401).send({ message: 'unauthorized access' });
+          req.client = c;
+          req.staff = s;
+          return next();
+        }
+        if (decoded.staffId) return res.status(401).send({ message: 'unauthorized access' });
+        if (!c || c.isActive !== true || c.login !== 'yes' || !c.sessionId || c.sessionId !== decoded.sid) {
+          return res.status(401).send({ message: 'unauthorized access' });
+        }
+        req.client = c;
+        next();
+      } catch (e) {
+        res.status(401).send({ message: 'unauthorized access' });
+      }
+    };
+
+    // client nijer live status (password chhara)
+    app.get('/client/me', verifyClientToken, async (req, res) => {
+      const limitInfo = await getLimitInfo(req.client);
+      if (req.staff) {
+        const s = req.staff;
+        return res.send({
+          _id: s._id,
+          name: s.name,
+          email: s.email,
+          phone: s.phone || '',
+          address: s.address || '',
+          role: s.role,
+          isActive: true,
+          login: 'yes',
+          isStaff: true,
+          slug: req.client.slug,
+          dealerName: req.client.name,
+          permissions: s.permissions || {},
+          limitExceeded: limitInfo.limitExceeded,
+          userLimit: limitInfo.userLimit,
+          excess: limitInfo.excess,
+        });
+      }
+      res.send({ ...publicClient(req.client), ...limitInfo });
+    });
+
+    // admin ek client er details (password/hash/session kokhono jabe na)
+    app.get('/client/:id', verifyToken, verifyAdmin, async (req, res) => {
+      try {
+        const id = req.params.id;
+        if (!ObjectId.isValid(id)) return res.status(404).json({ message: 'Client not found' });
+        const c = await clientCollection.findOne({ _id: new ObjectId(id) });
+        if (!c) return res.status(404).json({ message: 'Client not found' });
+        res.send(publicClient(c));
+      } catch (error) {
+        res.status(500).json({ message: 'Failed to fetch client' });
+      }
+    });
+
+    // client nijer password change (shudhu nijer, token theke id ashe; body theke kono id newa hoy na)
+    const changePassFails = new Map(); // clientId -> { count, lockUntil }
+    setInterval(() => {
+      const now = Date.now();
+      for (const [k, v] of changePassFails) if (v.lockUntil && now > v.lockUntil) changePassFails.delete(k);
+    }, 60 * 1000).unref();
+
+    app.post('/client/change-password', verifyClientToken, async (req, res) => {
+      try {
+        if (req.staff) return res.status(403).json({ message: 'Only the dealer can change the password.' });
+        const key = String(req.client._id);
+        const fail = changePassFails.get(key);
+        if (fail && fail.lockUntil && Date.now() < fail.lockUntil) {
+          return res.status(429).json({ message: 'Too many attempts. Try again later.' });
+        }
+
+        const body = req.body || {};
+        const currentPassword = typeof body.currentPassword === 'string' ? body.currentPassword : '';
+        const newPassword = typeof body.newPassword === 'string' ? body.newPassword : '';
+        const confirmPassword = typeof body.confirmPassword === 'string' ? body.confirmPassword : '';
+
+        if (!currentPassword || !newPassword || !confirmPassword) {
+          return res.status(400).json({ message: 'All fields are required!' });
+        }
+        if (currentPassword.length > 128) {
+          return res.status(400).json({ message: 'Current password is incorrect!' });
+        }
+        if (newPassword !== confirmPassword) {
+          return res.status(400).json({ message: 'New password and confirm password do not match!' });
+        }
+        if (!PASSWORD_RULE.test(newPassword)) {
+          return res.status(400).json({ message: PASSWORD_MESSAGE });
+        }
+
+        let ok = false;
+        if (req.client.passwordHash) {
+          ok = await verifyPasswordHash(currentPassword, req.client.passwordHash);
+        } else if (typeof req.client.password === 'string') {
+          ok = safeEqual(currentPassword, req.client.password);
+        }
+
+        if (!ok) {
+          const cur = fail || { count: 0, lockUntil: 0 };
+          cur.count += 1;
+          if (cur.count >= 5) {
+            cur.lockUntil = Date.now() + 15 * 60 * 1000;
+            cur.count = 0;
+          }
+          changePassFails.set(key, cur);
+          return res.status(400).json({ message: 'Current password is incorrect!' });
+        }
+        changePassFails.delete(key);
+
+        if (currentPassword === newPassword) {
+          return res.status(400).json({ message: 'New password must be different from current password!' });
+        }
+
+        // notun hash save + session bondho (force logout)
+        await clientCollection.updateOne(
+          { _id: req.client._id },
+          {
+            $set: { passwordHash: await hashPassword(newPassword), login: 'no' },
+            $unset: { password: '', sessionId: '' },
+          }
+        );
+
+        res.send({ success: true });
+      } catch (error) {
+        console.error('Change password error:', error);
+        res.status(500).json({ message: 'Failed to update password' });
+      }
+    });
+
+    // client nijer logout
+    app.post('/client/logout', verifyClientToken, async (req, res) => {
+      if (req.staff) {
+        await client.db(req.client.dbName).collection('user').updateOne({ _id: req.staff._id }, { $unset: { sessionId: '' } });
+        return res.send({ success: true });
+      }
+      await clientCollection.updateOne({ _id: req.client._id }, { $set: { login: 'no' }, $unset: { sessionId: '' } });
+      res.send({ success: true });
+    });
+
+    // ===== dealer এর staff login (একই /client/login endpoint থেকে ডাকা হয়) =====
+    const staffLogin = async (req, res, { email, password, slug, key, fail }) => {
+      const invalid = () => res.status(400).json({ message: 'Invalid email or password!' });
+      const tenant = slug ? await clientCollection.findOne({ slug }) : null;
+      let staff = null;
+      if (tenant && tenant.dbName) {
+        staff = await client.db(tenant.dbName).collection('user').findOne({ email }, CI);
+      }
+
+      let ok = false;
+      if (staff && staff.passwordHash) {
+        ok = await verifyPasswordHash(password, staff.passwordHash);
+      } else {
+        await verifyPasswordHash(password, await dummyHashPromise); // timing same রাখার জন্য
+      }
+
+      if (!ok) {
+        const cur = fail || { count: 0, lockUntil: 0 };
+        cur.count += 1;
+        if (cur.count >= CLIENT_MAX_FAILS) {
+          cur.lockUntil = Date.now() + CLIENT_LOCK_TIME;
+          cur.count = 0;
+        }
+        clientLoginFails.set(key, cur);
+        return invalid();
+      }
+      clientLoginFails.delete(key);
+
+      if (tenant.isActive !== true) return res.status(403).json({ message: 'Your company account is inactive!' });
+      if (staff.isActive !== true) return res.status(403).json({ message: 'Your account is inactive! Contact your dealer.' });
+
+      const sid = crypto.randomUUID();
+      await client.db(tenant.dbName).collection('user').updateOne(
+        { _id: staff._id },
+        { $set: { sessionId: sid, lastLoginAt: new Date() } }
+      );
+      const token = jwt.sign(
+        { clientId: String(tenant._id), staffId: String(staff._id), email: staff.email, sid, kind: 'staff' },
+        process.env.CLIENT_ACCESS_TOKEN_SECRET,
+        { expiresIn: '12h', algorithm: 'HS256' }
+      );
+      res.send({
+        success: true,
+        token,
+        client: {
+          _id: staff._id,
+          name: staff.name,
+          email: staff.email,
+          phone: staff.phone || '',
+          address: staff.address || '',
+          role: staff.role,
+          isActive: true,
+          isStaff: true,
+          permissions: staff.permissions || {},
+        },
+      });
+    };
+
     app.post('/client/login', async (req, res) => {
       try {
-        const { email, password } = req.body;
+        const email = String(req.body?.email || '').trim().toLowerCase();
+        const password = String(req.body?.password || '');
+        const invalid = () => res.status(400).json({ message: 'Invalid email or password!' });
 
-        // ১. ইমেইল দিয়ে ক্লায়েন্ট খোঁজা
-        const client = await clientCollection.findOne({ email });
-        if (!client) {
-          return res.status(400).json({ message: 'Email not found!' });
+        if (!email || !password || password.length > 128) return invalid();
+
+        const key = `${getIp(req)}|${email}`;
+        const fail = clientLoginFails.get(key);
+        if (fail && fail.lockUntil && Date.now() < fail.lockUntil) {
+          return res.status(429).json({ message: 'Too many attempts. Try again later.' });
         }
 
-        // ২. অ্যাকাউন্ট একটিভ আছে কিনা চেক করা
-        if (client.isActive === false || client.isActive === 'false') {
-          return res.status(400).json({ message: 'Your account is inactive!' });
+        const reqSlugEarly = String(req.body?.slug || '').trim().toLowerCase();
+        const client = await clientCollection.findOne({ email }, CI);
+
+        // dealer না হলে (বা অন্য subdomain এর হলে) এই company এর staff হিসেবে চেষ্টা
+        if (!client || client.slug !== reqSlugEarly) {
+          return staffLogin(req, res, { email, password, slug: reqSlugEarly, key, fail });
         }
 
-        // ৩. পাসওয়ার্ড মিলছে কিনা চেক করা
-        if (client.password !== password) {
-          return res.status(400).json({ message: 'Wrong password!' });
+        let ok = false;
+        if (client) {
+          if (client.passwordHash) {
+            ok = await verifyPasswordHash(password, client.passwordHash);
+          } else if (typeof client.password === 'string') {
+            // purano plain password: match korle sathe sathe hash e upgrade
+            ok = safeEqual(password, client.password);
+            if (ok) {
+              await clientCollection.updateOne(
+                { _id: client._id },
+                { $set: { passwordHash: await hashPassword(password) }, $unset: { password: '' } }
+              );
+            }
+          }
+        } else {
+          await verifyPasswordHash(password, await dummyHashPromise); // timing same rakhar jonno
         }
 
-        // ৪. JWT টোকেন তৈরি করা
-        const tokenPayload = { clientId: client._id, email: client.email };
+        if (!ok) {
+          const cur = fail || { count: 0, lockUntil: 0 };
+          cur.count += 1;
+          if (cur.count >= CLIENT_MAX_FAILS) {
+            cur.lockUntil = Date.now() + CLIENT_LOCK_TIME;
+            cur.count = 0;
+          }
+          clientLoginFails.set(key, cur);
+          return invalid();
+        }
+
+        clientLoginFails.delete(key);
+
+        if (!client.slug || !client.dbName) {
+          return res.status(403).json({ message: 'This account has no subdomain yet. Contact admin.' });
+        }
+        const reqSlug = String(req.body?.slug || '').trim().toLowerCase();
+        if (client.slug !== reqSlug) return invalid();
+
+        if (client.isActive !== true) {
+          return res.status(403).json({ message: 'Your account is inactive!' });
+        }
+
+        const sid = crypto.randomUUID();
+        await clientCollection.updateOne(
+          { _id: client._id },
+          { $set: { login: 'yes', sessionId: sid } }
+        );
+
+        const tokenPayload = { clientId: String(client._id), email: client.email, sid };
         const token = jwt.sign(
           tokenPayload,
-                    process.env.CLIENT_ACCESS_TOKEN_SECRET,
-          { expiresIn: '7d' }
+          process.env.CLIENT_ACCESS_TOKEN_SECRET,
+          { expiresIn: '12h', algorithm: 'HS256' }
         );
 
         // ৫. সফলভাবে রেসপন্স পাঠানো
@@ -540,21 +1131,499 @@ async function run() {
 
 
 
+    // ===== বাকি সব API সুরক্ষিত (PROTECT_API=true হলে চালু হবে) =====
+    const requireApiAuth = async (req, res, next) => {
+      if (req.method === 'OPTIONS') return next();
+      if (req.method === 'POST' && req.path === '/contact') return next();
+
+      const isFeatureRead = req.method === 'GET' && (req.path === '/feature' || req.path.startsWith('/feature/'));
+      const who = await resolveCaller(req);
+
+      // client: শুধু নিজের database এ ঢুকবে
+      if (who?.type === 'client') {
+        req.client = who.client;
+        req.staff = who.staff || null;
+        req.versionDb = who.dbName;
+        return tenantStore.run({ dbName: who.dbName }, () => next());
+      }
+
+      // login এর আগে (বা admin) feature চাইলে ডিফল্ট (কোনো data যায় না)
+      if (isFeatureRead) {
+        return res.send(
+          req.path === '/feature'
+            ? {}
+            : { key: req.path.slice('/feature/'.length), enabled: false, value: null }
+        );
+      }
+
+      // admin: শুধু নিজের control route (contact); client এর business data নয়
+      if (who?.type === 'admin') {
+        req.decoded = who.decoded;
+        if (req.path === '/contact' || req.path.startsWith('/contact/')) return next();
+        return res.status(403).send({ message: 'forbidden access' });
+      }
+
+      return res.status(401).send({ message: 'unauthorized access' });
+    };
+    app.use(requireApiAuth);
+
+    // ===== user limit ছাড়িয়ে গেলে dealer ও staff এর সব কাজ বন্ধ =====
+    // চলবে শুধু: GET /user, DELETE /user/:id, GET /feature
+    const isReservedRole = (n) => String(n || '').toLowerCase().replace(/[\s_-]+/g, '') === 'superadmin';
+    app.use(async (req, res, next) => {
+      if (!req.client || req.method === 'OPTIONS') return next();
+      const info = await getLimitInfo(req.client);
+      if (!info.limitExceeded) return next();
+      const ok =
+        (req.method === 'GET' && (req.path === '/user' || req.path === '/feature' || req.path.startsWith('/feature/'))) ||
+        (req.method === 'DELETE' && /^\/user\/[^/]+$/.test(req.path));
+      if (ok) return next();
+      return res.status(403).send({
+        limitExceeded: true,
+        message: req.staff
+          ? 'ডিলারের user limit পূর্ণ হয়েছে। ডিলারকে জানান।'
+          : `User limit পূর্ণ! আগে ${info.excess} জন user delete করুন।`,
+      });
+    });
+
+    // ===== /user ও /userRole শুধু dealer (client token) এর জন্য =====
+    const dealerOnly = (req, res, next) => {
+      if (!req.client) return res.status(403).send({ message: 'forbidden access' });
+      // staff শুধু তালিকা পড়তে (GET) পারবে, কিছু বদলাতে পারবে না
+      // (v1.7q) staff এখন module permission (user_list / user_assign / user_role) দিয়ে চলে, নিচের guard middleware দেখুন
+      next();
+    };
+    app.use('/user', dealerOnly);
+    app.use('/userRole', dealerOnly);
+
+    // ===== শুধু dealer নিজে (staff কখনোই নয়) =====
+    const dealerStrict = (req, res, next) => {
+      if (!req.client || req.staff) return res.status(403).send({ message: 'forbidden access' });
+      next();
+    };
+    app.use('/user-permission', dealerOnly);
+
+    // ===== Permission system: কোন module এর জন্য কোন API =====
+    // apis  = permission অনুযায়ী (get/post/put/delete) ব্যবহার করা যাবে
+    // reads = module এর View permission থাকলে শুধু GET করা যাবে (পেজ দেখানোর জন্য দরকারি ডাটা)
+    // কোনো পেজে 403 আসলে ওই module এর apis/reads এ প্রয়োজনীয় path যোগ করুন
+    const PERM_ACTIONS = ['get', 'post', 'put', 'delete'];
+    const METHOD_ACTION = { GET: 'get', POST: 'post', PUT: 'put', PATCH: 'put', DELETE: 'delete' };
+    const pathMatch = (path, list = []) => list.some((p) => path === p || path.startsWith(p + '/'));
+
+    const FREE_READ = ['/feature'];
+
+    // staff শুধু এই "Save ..." feature গুলো PUT করতে পারবে (সংশ্লিষ্ট module এ Add বা Edit থাকলে)
+    const STAFF_FEATURE_KEYS = {
+      orderSaveRoute: ['create_order', 'wholesale'],
+      orderSaveSr: ['create_order', 'wholesale'],
+      orderSaveDsr: ['create_order', 'wholesale'],
+      orderDirectSales: ['create_order', 'wholesale'],
+      orderPaymentMethod: ['create_order', 'wholesale'],
+      purchasePaymentMethod: ['purchase_add', 'purchase_all'],
+    };
+    const LOOKUP_READ = ['/product', '/category', '/unit', '/company', '/customer', '/route', '/user', '/userRole'];
+    const FIN_READ = [
+      '/income', '/expense', '/investment', '/adjustment', '/transfer', '/routeExpense',
+      '/sales', '/purchase', '/sales-due-payment', '/purchase-due-payment',
+      '/sales-bulk-return', '/purchase-bulk-return', '/sales-damage', '/damage-return',
+      '/stock-purchase', '/stock-adjustment',
+    ];
+
+    // Purchase form পেজগুলোর (balance / stock হিসাব) জন্য দরকারি GET
+    const PURCHASE_FORM_READ = [...FIN_READ, '/bulk-return-stock'];
+
+    // Sales form পেজগুলোর (balance / credit limit / stock হিসাব) জন্য দরকারি GET
+    const SALES_FORM_READ = [...FIN_READ, '/bulk-return-stock'];
+
+    const PERMISSION_MODULES = {
+      dashboard: { reads: [...FIN_READ, '/sales-sr-target'] },
+      wholesale: { apis: ['/sales'], reads: [...SALES_FORM_READ, '/sales-sr-target'] },
+      create_order: { apis: ['/sales'], reads: SALES_FORM_READ },
+      sales_return: { apis: ['/sales'], reads: SALES_FORM_READ },
+      sales_bulk_return: { apis: ['/sales-bulk-return', '/sales-bulk-return-resync'], reads: SALES_FORM_READ },
+      sales_due_payment: { apis: ['/sales-due-payment'], reads: SALES_FORM_READ },
+      sales_sr_target: { apis: ['/sales-sr-target'], reads: ['/sales'] },
+      purchase_add: { apis: ['/purchase'], reads: PURCHASE_FORM_READ },
+      purchase_all: { apis: ['/purchase'], reads: PURCHASE_FORM_READ },
+      purchase_return: { apis: ['/purchase'], reads: PURCHASE_FORM_READ },
+      purchase_bulk_return: { apis: ['/purchase-bulk-return', '/bulk-return-stock'], reads: PURCHASE_FORM_READ },
+      purchase_due_payment: { apis: ['/purchase-due-payment'], reads: FIN_READ },
+      product: { apis: ['/product'], reads: ['/stock-purchase'] },
+      category: { apis: ['/category'] },
+      units: { apis: ['/unit'] },
+      customers: { apis: ['/customer'], reads: ['/sales', '/sales-due-payment', '/sales-bulk-return', '/sales-damage'] },
+      company: { apis: ['/company'], reads: ['/purchase', '/purchase-due-payment', '/purchase-bulk-return', '/damage-return'] },
+      company_account: { reads: ['/purchase', '/purchase-due-payment', '/purchase-bulk-return', '/damage-return'] },
+      customer_account: { reads: ['/sales', '/sales-due-payment', '/sales-bulk-return', '/sales-damage'] },
+      routes: { apis: ['/route'] },
+      stock_purchase: { apis: ['/stock-purchase'], reads: FIN_READ },
+      stock_products: { reads: FIN_READ },
+      stock_alert: { reads: FIN_READ },
+      stock_adjustment: {
+        apis: ['/stock-adjustment', '/adjustment-stock'],
+        reads: FIN_READ,
+      },
+      damage_stock_invoice: { apis: ['/sales-damage'], reads: SALES_FORM_READ },
+      damage_single_invoice: { reads: SALES_FORM_READ },
+      damage_stock_products: { reads: SALES_FORM_READ },
+      damage_return_products: { reads: SALES_FORM_READ },
+      damage_return_invoice: {
+        apis: ['/damage-return'],
+        reads: SALES_FORM_READ,
+      },
+      account_balance: { reads: FIN_READ },
+      account_investment: { apis: ['/investment', '/adjustment'], reads: FIN_READ },
+      account_income: { apis: ['/income'], reads: FIN_READ },
+      account_expense: { apis: ['/expense'], reads: FIN_READ },
+      account_route_expense: { apis: ['/routeExpense'], reads: FIN_READ },
+      account_transfer: { apis: ['/transfer'], reads: FIN_READ },
+      account_sales: { reads: FIN_READ },
+      account_sales_return: { reads: FIN_READ },
+      account_sales_bulk_return: { reads: FIN_READ },
+      account_sales_damage_return: { reads: FIN_READ },
+      account_sales_due: { reads: FIN_READ },
+      account_purchase: { reads: FIN_READ },
+      account_purchase_return: { reads: FIN_READ },
+      account_purchase_bulk_return: { reads: FIN_READ },
+      account_purchase_damage_return: { reads: FIN_READ },
+      account_purchase_due: { reads: FIN_READ },
+      profit_sales_wise: { reads: FIN_READ },
+      profit_income: { reads: FIN_READ },
+      profit_expense: { reads: FIN_READ },
+      profit_route_expense: { reads: FIN_READ },
+      profit_others: { reads: FIN_READ },
+      sales_report: { reads: FIN_READ },
+      purchase_report: { reads: FIN_READ },
+      stock_report: { reads: FIN_READ },
+      account_report: { reads: FIN_READ },
+      user_list: { apis: ['/user'], reads: ['/userRole'] },
+      user_assign: { apis: ['/user-permission'], reads: ['/user'] },
+      user_role: { apis: ['/userRole'] },
+      features: { apis: ['/feature'] },
+    };
+
+    // শুধু জানা module key ও জানা action গ্রহণ করে; Add/Edit/Delete থাকলে View নিজে থেকে যোগ হয়
+    const sanitizePermissions = (input) => {
+      const out = {};
+      if (!input || typeof input !== 'object' || Array.isArray(input)) return out;
+      for (const key of Object.keys(PERMISSION_MODULES)) {
+        const raw = input[key];
+        if (!Array.isArray(raw)) continue;
+        const acts = PERM_ACTIONS.filter((a) => raw.includes(a));
+        if (acts.length === 0) continue;
+        if (!acts.includes('get')) acts.unshift('get');
+        out[key] = acts;
+      }
+      return out;
+    };
+
+    // staff এর প্রতিটা request এ permission চেক (default: বন্ধ)
+    app.use((req, res, next) => {
+      if (!req.staff) return next(); // dealer এর সব access
+      const deny = () => res.status(403).send({ message: 'You do not have permission for this action' });
+      const action = METHOD_ACTION[req.method];
+      if (!action) return deny();
+      if (action === 'get' && pathMatch(req.path, FREE_READ)) return next();
+
+      // order / purchase এর "Save ..." feature: সংশ্লিষ্ট module এ Add বা Edit থাকলে staff পারবে
+      if (req.method === 'PUT') {
+        const fm = req.path.match(/^\/feature\/([^/]+)$/);
+        const need = fm && STAFF_FEATURE_KEYS[fm[1]];
+        if (need) {
+          const sp = req.staff.permissions || {};
+          const okFeature = need.some((k) => Array.isArray(sp[k]) && (sp[k].includes('post') || sp[k].includes('put')));
+          if (okFeature) return next();
+        }
+      }
+
+      // পুরো purchase delete শুধু purchase_all এর Delete permission দিয়ে
+      if (action === 'delete' && /^\/purchase\/[^/]+$/.test(req.path)) {
+        const pa = (req.staff.permissions || {}).purchase_all;
+        return Array.isArray(pa) && pa.includes('delete') ? next() : deny();
+      }
+
+      // পুরো order delete শুধু wholesale এর Delete permission দিয়ে
+      if (action === 'delete' && /^\/sales\/[^/]+$/.test(req.path)) {
+        const w = (req.staff.permissions || {}).wholesale;
+        return Array.isArray(w) && w.includes('delete') ? next() : deny();
+      }
+
+      const sperm = req.staff.permissions || {};
+      const hasP = (k, a) => Array.isArray(sperm[k]) && sperm[k].includes(a);
+
+      // নতুন purchase তৈরি: শুধু purchase_add এর Add দিয়ে
+      if (action === 'post' && /^\/purchase\/?$/.test(req.path)) {
+        return hasP('purchase_add', 'post') ? next() : deny();
+      }
+      // নতুন order তৈরি: শুধু create_order এর Add দিয়ে
+      if (action === 'post' && /^\/sales\/?$/.test(req.path)) {
+        return hasP('create_order', 'post') ? next() : deny();
+      }
+      // purchase edit: পুরো body শুধু purchase_all Edit দিয়ে.
+      // শুধু purchase_return Edit থাকলে body কেটে শুধু returnHistory রাখা হয়
+      if (action === 'put' && req.method === 'PUT' && /^\/purchase\/[^/]+$/.test(req.path)) {
+        if (hasP('purchase_all', 'put')) return next();
+        if ((hasP('purchase_return', 'put') || hasP('purchase_return', 'post')) && Array.isArray(req.body?.returnHistory)) {
+          req.body = { returnHistory: req.body.returnHistory };
+          return next();
+        }
+        return deny();
+      }
+      // order edit: পুরো body শুধু wholesale Edit দিয়ে.
+      // শুধু sales_return Edit থাকলে body কেটে শুধু returnHistory রাখা হয়
+      if (action === 'put' && req.method === 'PUT' && /^\/sales\/[^/]+$/.test(req.path)) {
+        if (hasP('wholesale', 'put')) return next();
+        if ((hasP('sales_return', 'put') || hasP('sales_return', 'post')) && Array.isArray(req.body?.returnHistory)) {
+          req.body = { returnHistory: req.body.returnHistory };
+          return next();
+        }
+        return deny();
+      }
+
+      const perms = req.staff.permissions || {};
+      let granted = false;
+      let hasAny = false;
+      for (const key of Object.keys(perms)) {
+        const mod = PERMISSION_MODULES[key];
+        const acts = Array.isArray(perms[key]) ? perms[key] : [];
+        if (!mod || !acts.includes('get')) continue;
+        hasAny = true;
+        if (acts.includes(action) && pathMatch(req.path, mod.apis)) { granted = true; break; }
+        if (action === 'get' && pathMatch(req.path, mod.reads)) { granted = true; break; }
+      }
+      if (!granted && hasAny && action === 'get' && pathMatch(req.path, LOOKUP_READ)) granted = true;
+      return granted ? next() : deny();
+    });
+
+    // ===== Users module guard (v1.7q): staff নিজের চেয়ে সমান / বেশি permission এর user বদলাতে পারবে না =====
+    // permSubset(a, b): a এর সব module + action b তেও আছে?
+    const permSubset = (a, b) => {
+      const pa = sanitizePermissions(a);
+      const pb = sanitizePermissions(b);
+      return Object.keys(pa).every((k) => pa[k].every((x) => (pb[k] || []).includes(x)));
+    };
+    // target শুধু তখনই বদলানো যাবে যখন actor এর permission তার চেয়ে কঠোরভাবে বেশি
+    const permStrictlyLess = (target, actor) => permSubset(target, actor) && !permSubset(actor, target);
+
+    app.use(async (req, res, next) => {
+      if (!req.staff) return next(); // dealer (Super Admin) এর সব access
+      if (req.method !== 'PUT' && req.method !== 'DELETE') return next();
+      const m = req.path.match(/^\/(user|user-permission)\/([^/]+)$/);
+      if (!m) return next();
+      const kind = m[1];
+      const targetId = m[2];
+      const deny = (message) => res.status(403).send({ message });
+
+      if (!ObjectId.isValid(targetId)) return res.status(404).send({ message: 'User not found' });
+      // নিজেকে delete / inactive / edit / permission বদল করা যাবে না
+      if (String(req.staff._id) === String(targetId)) {
+        return deny('নিজের user নিজে বদলানো বা delete করা যাবে না!');
+      }
+      const target = await userCollection.findOne({ _id: new ObjectId(targetId) }, { projection: { permissions: 1 } });
+      if (!target) return res.status(404).send({ message: 'User not found' });
+      // নিজের সমান বা বেশি permission এর user কে বদলানো যাবে না
+      if (!permStrictlyLess(target.permissions, req.staff.permissions)) {
+        return deny('আপনার সমান বা বেশি permission এর user কে বদলানো যাবে না!');
+      }
+      // যে permission নিজের নেই তা অন্যকে দেওয়া যাবে না (privilege escalation বন্ধ)
+      if (kind === 'user-permission') {
+        const clean = sanitizePermissions(req.body?.permissions);
+        if (!permSubset(clean, req.staff.permissions)) {
+          return deny('যে permission আপনার নিজের নেই তা অন্যকে দেওয়া যাবে না!');
+        }
+      }
+      next();
+    });
+
+    // ===== user permission API (শুধু dealer) =====
+    app.get('/user-permission/:userId', async (req, res) => {
+      const { userId } = req.params;
+      if (!ObjectId.isValid(userId)) return res.status(404).send({ message: 'User not found' });
+      const u = await userCollection.findOne(
+        { _id: new ObjectId(userId) },
+        { projection: { name: 1, email: 1, role: 1, isActive: 1, permissions: 1 } }
+      );
+      if (!u) return res.status(404).send({ message: 'User not found' });
+      res.send({
+        _id: u._id,
+        name: u.name,
+        email: u.email,
+        role: u.role,
+        isActive: u.isActive,
+        permissions: sanitizePermissions(u.permissions),
+      });
+    });
+
+    app.put('/user-permission/:userId', async (req, res) => {
+      const { userId } = req.params;
+      if (!ObjectId.isValid(userId)) return res.status(404).send({ message: 'User not found' });
+      const target = await userCollection.findOne({ _id: new ObjectId(userId) }, { projection: { _id: 1 } });
+      if (!target) return res.status(404).send({ message: 'User not found' });
+      const clean = sanitizePermissions(req.body?.permissions);
+      await userCollection.updateOne(
+        { _id: target._id },
+        { $set: { permissions: clean, permissionsUpdatedAt: new Date() } }
+      );
+      res.send({ success: true, permissions: clean });
+    });
+
+    // ===== dealer এর user (SR / Manager / Delivery Man) validate + password hash =====
+    const EMAIL_RULE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const PHONE_RULE = /^[0-9+\-\s()]{6,20}$/;
+    const cleanStr = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
+
+    const buildUserDoc = async (body, { requirePassword = false, excludeId = null } = {}) => {
+      const b = body || {};
+      const name = cleanStr(b.name, 100);
+      const email = cleanStr(b.email, 150).toLowerCase();
+      const phone = cleanStr(b.phone, 20);
+      const address = cleanStr(b.address, 300);
+      const roleInput = cleanStr(b.role, 50);
+      const password = typeof b.password === 'string' ? b.password : '';
+
+      if (!name) return { error: 'Name is required!' };
+      if (!email || !EMAIL_RULE.test(email)) return { error: 'A valid email is required!' };
+      if (phone && !PHONE_RULE.test(phone)) return { error: 'Invalid phone number!' };
+      if (!roleInput) return { error: 'Role is required!' };
+
+      // role অবশ্যই এই dealer এর নিজের role list এ থাকতে হবে
+      const roleDoc = await userRoleCollection.findOne({ role: roleInput }, CI);
+      if (!roleDoc) return { error: 'Invalid role selected!' };
+
+      const notSelf = excludeId ? { _id: { $ne: excludeId } } : {};
+      const emailDup = await userCollection.findOne({ email, ...notSelf }, CI);
+      if (emailDup) return { error: 'This email already exists!' };
+      if (phone) {
+        const phoneDup = await userCollection.findOne({ phone, ...notSelf });
+        if (phoneDup) return { error: 'This phone number already exists!' };
+      }
+
+      let passwordHash = null;
+      if (password) {
+        if (!PASSWORD_RULE.test(password)) return { error: PASSWORD_MESSAGE };
+        passwordHash = await hashPassword(password);
+      } else if (requirePassword) {
+        return { error: 'Password is required!' };
+      }
+
+      return {
+        doc: { name, email, phone, address, role: roleDoc.role, isActive: b.isActive === true },
+        passwordHash,
+      };
+    };
+
+    // ===== Stock / টাকার কাজ: হয় সব হবে, নাহলে কিছুই হবে না (transaction) =====
+    // একই client এর এই ধরনের কাজ লাইন ধরে একটার পর একটা চলবে (দুজন একসাথে একই স্টক বেচতে পারবে না)
+    const tenantLocks = new Map();
+    const acquireTenantLock = async (key) => {
+      const prev = tenantLocks.get(key) || Promise.resolve();
+      let release;
+      const gate = new Promise((r) => (release = r));
+      const tail = prev.then(() => gate);
+      tenantLocks.set(key, tail);
+      await prev;
+      return () => {
+        release();
+        if (tenantLocks.get(key) === tail) tenantLocks.delete(key);
+      };
+    };
+
+    const stockTx = async (req, res, next) => {
+      const store = tenantStore.getStore();
+      if (!store || !store.dbName) return next();
+
+      const release = await acquireTenantLock(store.dbName);
+      const session = client.startSession();
+      let done = false;
+      let sending = false;
+      let timer = null;
+
+      const finish = async (commit) => {
+        if (done) return true;
+        done = true;
+        clearTimeout(timer);
+        let ok = true;
+        try {
+          if (commit) await session.commitTransaction();
+          else await session.abortTransaction();
+        } catch (e) {
+          ok = false;
+          console.error('Transaction end failed:', e.message);
+          try { await session.abortTransaction(); } catch (e2) { }
+        }
+        try { await session.endSession(); } catch (e) { }
+        release();
+        return ok;
+      };
+
+      try {
+        session.startTransaction({ writeConcern: { w: 'majority' } });
+      } catch (e) {
+        await finish(false);
+        return res.status(500).send({ message: 'Server error' });
+      }
+      store.session = session;
+
+      // response পাঠানোর ঠিক আগে: সফল হলে commit, error হলে সব বাতিল (rollback)
+      const origSend = res.send.bind(res);
+      res.send = function (body) {
+        if (sending) return origSend(body);
+        sending = true;
+        const commit = res.statusCode < 400;
+        finish(commit).then((ok) => {
+          if (commit && !ok) {
+            res.status(500);
+            return origSend({ message: 'Save failed, nothing was changed. Please try again.' });
+          }
+          return origSend(body);
+        });
+        return res;
+      };
+
+      timer = setTimeout(() => {
+        if (!sending) res.status(500).send({ message: 'Request timed out, nothing was changed.' });
+      }, 55 * 1000);
+      res.on('close', () => { finish(false); });
+
+      next();
+    };
+
+    // কোন কোন route এ transaction লাগবে
+    const STOCK_TX_RULES = [
+      { methods: ['POST'], re: /^\/(stock-adjustment|sales-damage|sales-bulk-return|sales-bulk-return-resync|purchase-bulk-return|sales)$/ },
+      { methods: ['PUT', 'DELETE'], re: /^\/(stock-adjustment|purchase|sales)\/[^/]+$/ },
+      { methods: ['PUT'], re: /^\/(sales-damage|sales-bulk-return|purchase-bulk-return)\/[^/]+$/ },
+      { methods: ['PATCH'], re: /^\/stock-purchase\/[^/]+\/sell-price$/ },
+    ];
+    app.use((req, res, next) => {
+      const hit = STOCK_TX_RULES.some((r) => r.methods.includes(req.method) && r.re.test(req.path));
+      return hit ? stockTx(req, res, next) : next();
+    });
+
     // contact related api
 
 
-    app.get('/contact', async (req, res) => {
+    app.get('/contact', verifyToken, verifyAdmin, async (req, res) => {
       const result = await contactCollection.find().toArray();
       res.send(result);
     });
 
-    app.post('/contact', async (req, res) => {
+    app.post('/contact', mkLimiter(15 * 60 * 1000, 10, 'Too many messages. Try again later.'), async (req, res) => {
+      const clean = {};
+      Object.entries(req.body || {}).slice(0, 12).forEach(([k, v]) => {
+        if ((typeof v === 'string' || typeof v === 'number') && !k.startsWith('$') && !k.includes('.')) {
+          clean[k] = typeof v === 'string' ? v.slice(0, 2000) : v;
+        }
+      });
+      if (Object.keys(clean).length === 0) return res.status(400).send({ message: 'Invalid data' });
+      req.body = clean;
       const item = req.body;
       const result = await contactCollection.insertOne(item);
       res.send(result);
     });
 
-    app.delete('/contact/:id', async (req, res) => {
+    app.delete('/contact/:id', verifyToken, verifyAdmin, async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
       const result = await contactCollection.deleteOne(query);
@@ -934,7 +2003,9 @@ async function run() {
     // Get all users
     app.get('/user', async (req, res) => {
       try {
-        const result = await userCollection.find().toArray();
+        const result = await userCollection
+          .find({}, { projection: req.staff && !(req.staff.permissions?.user_assign || []).includes('get') ? { password: 0, passwordHash: 0, sessionId: 0, permissions: 0 } : { password: 0, passwordHash: 0, sessionId: 0 } })
+          .toArray();
         res.send(result);
       } catch (error) {
         res.status(500).send({ error: 'Failed to fetch users' });
@@ -945,8 +2016,19 @@ async function run() {
     app.post('/user', async (req, res) => {
       try {
         const user = req.body;
+        const limit = Number.isInteger(req.client?.userLimit) && req.client.userLimit >= 1 ? req.client.userLimit : 10;
+        const staffCount = await userCollection.countDocuments({});
+        if (staffCount + 1 >= limit) {
+          return res.status(400).send({ message: `User limit reached (${limit} including you). Delete a user or ask admin to increase the limit.` });
+        }
         // আপনি চাইলে এখানে পাসওয়ার্ড হাশ করে নিতে পারেন
-        const result = await userCollection.insertOne(user);
+        const built = await buildUserDoc(user, { requirePassword: true });
+        if (built.error) return res.status(400).send({ message: built.error });
+        const result = await userCollection.insertOne({
+          ...built.doc,
+          passwordHash: built.passwordHash,
+          createdAt: new Date().toLocaleString('en-GB', { timeZone: 'Asia/Dhaka', hour12: true }),
+        });
         res.send(result);
       } catch (error) {
         res.status(500).send({ error: 'Failed to create user' });
@@ -959,10 +2041,31 @@ async function run() {
         const { id } = req.params;
         const { _id: _ignoreId, createdAt: _ignoreCreated, ...updatedData } = req.body;
 
-        const result = await userCollection.updateOne(
-          { _id: new ObjectId(id) },
-          { $set: updatedData }
-        );
+        if (!ObjectId.isValid(id)) return res.status(404).json({ error: 'User record not found' });
+        const existing = await userCollection.findOne({ _id: new ObjectId(id) });
+        if (!existing) return res.status(404).json({ error: 'User record not found' });
+
+        const built = await buildUserDoc(updatedData, { requirePassword: false, excludeId: existing._id });
+        if (built.error) return res.status(400).json({ message: built.error });
+
+        const setDoc = { ...built.doc };
+        const unsetDoc = {};
+        if (built.passwordHash) {
+          // dealer নতুন password দিলে: নতুন hash + পুরোনো session বন্ধ
+          setDoc.passwordHash = built.passwordHash;
+          setDoc.passwordChangedAt = new Date();
+          unsetDoc.password = '';
+          unsetDoc.sessionId = '';
+        } else if (!existing.passwordHash && typeof existing.password === 'string' && existing.password) {
+          // আগের plain password থাকলে edit এর সময়ই hash এ রূপান্তর
+          setDoc.passwordHash = await hashPassword(existing.password);
+          unsetDoc.password = '';
+        }
+        if (!setDoc.isActive) unsetDoc.sessionId = '';
+
+        const updateDoc = { $set: setDoc };
+        if (Object.keys(unsetDoc).length > 0) updateDoc.$unset = unsetDoc;
+        const result = await userCollection.updateOne({ _id: existing._id }, updateDoc);
 
         if (result.matchedCount === 0) {
           return res.status(404).json({ error: 'User record not found' });
@@ -1001,7 +2104,14 @@ async function run() {
     // ২. নতুন ইউজার রোল যোগ করা (POST)
     app.post('/userRole', async (req, res) => {
       const item = req.body;
-      const result = await userRoleCollection.insertOne(item);
+      const roleName = typeof item.role === 'string' ? item.role.trim() : '';
+      if (roleName.length < 2 || roleName.length > 50) {
+        return res.status(400).send({ message: 'Role name must be 2-50 characters!' });
+      }
+      if (isReservedRole(roleName)) return res.status(400).send({ message: '"Super Admin" নামে role বানানো যাবে না!' });
+      const roleDup = await userRoleCollection.findOne({ role: roleName }, CI);
+      if (roleDup) return res.status(400).send({ message: 'This role already exists!' });
+      const result = await userRoleCollection.insertOne({ role: roleName, createdAt: new Date().toISOString() });
       res.send(result);
     });
 
@@ -1010,10 +2120,26 @@ async function run() {
         const { id } = req.params;
         const { _id: _ignoreId, createdAt: _ignoreCreated, ...updatedData } = req.body;
 
+        const roleName = typeof updatedData.role === 'string' ? updatedData.role.trim() : '';
+        if (roleName.length < 2 || roleName.length > 50) {
+          return res.status(400).json({ message: 'Role name must be 2-50 characters!' });
+        }
+        if (!ObjectId.isValid(id)) return res.status(404).json({ error: 'Role record not found' });
+        const existingRole = await userRoleCollection.findOne({ _id: new ObjectId(id) });
+        if (!existingRole) return res.status(404).json({ error: 'Role record not found' });
+
+        if (isReservedRole(roleName)) return res.status(400).json({ message: '"Super Admin" নামে role বানানো যাবে না!' });
+        const roleDup = await userRoleCollection.findOne({ role: roleName, _id: { $ne: existingRole._id } }, CI);
+        if (roleDup) return res.status(400).json({ message: 'This role already exists!' });
+
         const result = await userRoleCollection.updateOne(
-          { _id: new ObjectId(id) },
-          { $set: updatedData }
+          { _id: existingRole._id },
+          { $set: { role: roleName } }
         );
+        // role এর নাম বদলালে ওই role এর সব user এর role ও বদলে যাবে
+        if (existingRole.role && existingRole.role !== roleName) {
+          await userCollection.updateMany({ role: existingRole.role }, { $set: { role: roleName } });
+        }
 
         if (result.matchedCount === 0) {
           return res.status(404).json({ error: 'Role record not found' });
@@ -1030,6 +2156,13 @@ async function run() {
     app.delete('/userRole/:id', async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
+      const roleToDelete = await userRoleCollection.findOne(query);
+      if (roleToDelete?.role) {
+        const inUse = await userCollection.countDocuments({ role: roleToDelete.role });
+        if (inUse > 0) {
+          return res.status(400).send({ message: `This role is used by ${inUse} user(s). Change or delete those users first.` });
+        }
+      }
       const result = await userRoleCollection.deleteOne(query);
       res.send(result);
     });
@@ -2575,10 +3708,11 @@ async function run() {
         item.paymentDate = new Date().toISOString();
       }
       if (item.invoiceNo) {
-        const key = `p:${item.invoiceNo}`;
+        const key = `p:${tenantStore.getStore()?.dbName}:${item.invoiceNo}`;
         if (recentKeys.has(key)) return res.send({ acknowledged: true, duplicate: true });
         recentKeys.add(key);
         setTimeout(() => recentKeys.delete(key), 15000);
+        res.on('finish', () => { if (res.statusCode >= 400) recentKeys.delete(key); });
       }
       const result = await purchaseCollection.insertOne(item);
       res.send(result);
@@ -2598,7 +3732,8 @@ async function run() {
     app.put('/purchase/:id', async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
-      const { unsetFields, returnOnly, stockCreated: _ignoreStockCreated, _id: _ignoreId, ...updatedData } = req.body;
+      const { unsetFields: unsetFieldsRaw, returnOnly, stockCreated: _ignoreStockCreated, _id: _ignoreId, createdAt: _ignoreCreated, ...updatedData } = req.body;
+      const unsetFields = cleanUnset(unsetFieldsRaw);
 
       const updateDoc = {
         $set: updatedData,
@@ -3428,12 +4563,13 @@ async function run() {
     });
 
     app.post('/sales', async (req, res) => {
-      const { stockBorrowConfirmed, ...item } = req.body;
+      const { stockBorrowConfirmed, stockAllocations: _ignoreAlloc, _id: _ignoreId, ...item } = req.body;
       if (item.orderNo) {
-        const key = `s:${item.orderNo}`;
+        const key = `s:${tenantStore.getStore()?.dbName}:${item.orderNo}`;
         if (recentKeys.has(key)) return res.send({ acknowledged: true, duplicate: true });
         recentKeys.add(key);
         setTimeout(() => recentKeys.delete(key), 10000);
+        res.on('finish', () => { if (res.statusCode >= 400) recentKeys.delete(key); });
       }
       item.createdAt = new Date().toISOString();
       if (item.status === 'Delivered') item.deliveredAt = item.createdAt;
@@ -3476,7 +4612,8 @@ async function run() {
     app.put('/sales/:id', async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
-      const { unsetFields, stockBorrowConfirmed, ...updatedData } = req.body;
+      const { unsetFields: unsetFieldsRaw, stockBorrowConfirmed, stockAllocations: _ignoreAlloc, _id: _ignoreId, createdAt: _ignoreCreated, ...updatedData } = req.body;
+      const unsetFields = cleanUnset(unsetFieldsRaw);
       const allowBorrow = stockBorrowConfirmed === true;
 
       const updateDoc = {
@@ -3591,6 +4728,20 @@ async function run() {
     });
 
 
+
+    // কোনো route এ error হলে সুন্দর response (request ঝুলে থাকবে না)
+    app.use((err, req, res, next) => {
+      console.error('Route error:', req.method, req.path, err?.message);
+      if (res.headersSent) return next(err);
+      const msg = String(err?.message || '');
+      if (msg === 'TENANT_NOT_SET') return res.status(401).send({ message: 'unauthorized access' });
+      if (/^BSON/.test(String(err?.name)) || /ObjectId|24 character hex/i.test(msg)) {
+        return res.status(400).send({ message: 'Invalid ID' });
+      }
+      if (err?.type === 'entity.parse.failed') return res.status(400).send({ message: 'Invalid JSON' });
+      if (err?.type === 'entity.too.large') return res.status(413).send({ message: 'Data too large' });
+      res.status(500).send({ message: 'Server error' });
+    });
 
     await client.db("admin").command({ ping: 1 });
     console.log("Pinged your deployment. You successfully connected to MongoDB!");
