@@ -169,7 +169,7 @@ const resolveCaller = async (req) => {
   try {
     const d = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, { algorithms: ['HS256'] });
     const u = await control.collection('users').findOne({ email: d.email }, CI_OPT);
-    if (u?.role === 'admin') return { type: 'admin', decoded: d };
+    if (u?.role === 'admin' && d.sid && u.sessionId === d.sid) return { type: 'admin', decoded: d };
   } catch (e) { }
   return null;
 };
@@ -373,7 +373,13 @@ async function run() {
         if (!decodedFirebase.email) {
           return res.status(401).send({ message: 'unauthorized access' });
         }
-        const token = jwt.sign({ email: decodedFirebase.email }, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '1h' });
+        const sid = crypto.randomUUID();
+        await usersCollection.updateOne(
+          { email: decodedFirebase.email },
+          { $set: { sessionId: sid } },
+          { collation: { locale: 'en', strength: 2 } }
+        );
+        const token = jwt.sign({ email: decodedFirebase.email, sid }, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '1h' });
         res.send({ token });
       } catch (error) {
         console.error('JWT ERROR:', error.code, error.message);
@@ -392,7 +398,17 @@ async function run() {
         if (err) {
           return res.status(401).send({ message: 'unauthorized access' })
         }
-        req.decoded = decoded;
+        usersCollection
+          .findOne({ email: decoded.email }, { collation: { locale: 'en', strength: 2 } })
+          .then((u) => {
+            if (!decoded.sid || !u || !u.sessionId || u.sessionId !== decoded.sid) {
+              return res.status(401).send({ message: 'unauthorized access' });
+            }
+            req.decoded = decoded;
+            next();
+          })
+          .catch(() => res.status(401).send({ message: 'unauthorized access' }));
+        return;
         next();
       })
     }
@@ -438,7 +454,7 @@ async function run() {
     // users related api
 
     app.get('/users', verifyToken, verifyAdmin, async (req, res) => {
-      const result = await usersCollection.find().toArray();
+      const result = await usersCollection.find({}, { projection: { sessionId: 0 } }).toArray();
       res.send(result);
     });
 
@@ -1293,10 +1309,35 @@ async function run() {
       profit_expense: { reads: FIN_READ },
       profit_route_expense: { reads: FIN_READ },
       profit_others: { reads: FIN_READ },
-      sales_report: { reads: FIN_READ },
-      purchase_report: { reads: FIN_READ },
-      stock_report: { reads: FIN_READ },
-      account_report: { reads: FIN_READ },
+      ...Object.fromEntries(
+        [
+          'sales_report_wholesales', 'sales_report_todays', 'sales_report_customer_invoice',
+          'sales_report_product_wise', 'sales_report_date_top', 'sales_report_net_delivery',
+          'sales_report_top_sheet', 'sales_report_customer_ledger', 'sales_report_customer_due',
+          'sales_report_sr_dsr_due', 'sales_report_return',
+        ].map((k) => [k, { reads: FIN_READ }])
+      ),
+      ...Object.fromEntries(
+        [
+          'purchase_report_invoice', 'purchase_report_product', 'purchase_report_vs_rec_date',
+          'purchase_report_vs_rec_sum', 'purchase_report_top_chart', 'purchase_report_ledger',
+          'purchase_report_due', 'purchase_report_return',
+        ].map((k) => [k, { reads: FIN_READ }])
+      ),
+      ...Object.fromEntries(
+        [
+          'stock_report_current', 'stock_report_damage_daily', 'stock_report_damage_summery',
+          'stock_report_dam_return', 'stock_report_dam_return_summery',
+        ].map((k) => [k, { reads: FIN_READ }])
+      ),
+      ...Object.fromEntries(
+        [
+          'account_report_daybook', 'account_report_cashbook', 'account_report_mobile', 'account_report_bank',
+          'account_report_income', 'account_report_expense', 'account_report_route_expense', 'account_report_transfer',
+          'account_report_top_buy', 'account_report_top_sell', 'account_report_sales_profit',
+          'account_report_over_under', 'account_report_daily_statement', 'account_report_income_statement',
+        ].map((k) => [k, { reads: FIN_READ }])
+      ),
       user_list: { apis: ['/user'], reads: ['/userRole'] },
       user_assign: { apis: ['/user-permission'], reads: ['/user'] },
       user_role: { apis: ['/userRole'] },
