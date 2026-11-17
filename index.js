@@ -88,7 +88,9 @@ const ORIGIN_PATTERNS = [
 if (!IS_PROD) {
   ORIGIN_PATTERNS.push(
     /^https?:\/\/([a-z0-9-]+\.)?localhost(:\d+)?$/,
-    /^http:\/\/127\.0\.0\.1(:\d+)?$/
+    /^http:\/\/127\.0\.0\.1(:\d+)?$/,
+    /^http:\/\/([a-z0-9-]+\.)?\d{1,3}(\.\d{1,3}){3}\.nip\.io(:\d+)?$/,
+    /^http:\/\/\d{1,3}(\.\d{1,3}){3}(:\d+)?$/
   );
 }
 app.use(
@@ -143,8 +145,78 @@ const loadStaff = async (c, d) => {
   if (!c || c.isActive !== true || !c.dbName) return null;
   if (!d?.staffId || !ObjectId.isValid(d.staffId)) return null;
   const s = await client.db(c.dbName).collection('user').findOne({ _id: new ObjectId(d.staffId) });
-  if (!s || s.isActive !== true || !s.sessionId || s.sessionId !== d.sid) return null;
+  if (!s || s.isActive !== true || !sidOk(s, d.sid)) return null;
   return s;
+};
+
+// ===== login history + last active (v1.8g) =====
+const ipOf = (req) => String(req.ip || req.socket?.remoteAddress || 'unknown').replace(/^::ffff:/, '').replace(/^::1$/, '127.0.0.1');
+const parseDevice = (ua = '') => {
+  const s = String(ua);
+  if (!s) return 'Unknown';
+  const os = /Windows/i.test(s) ? 'Windows' : /Android/i.test(s) ? 'Android' : /iPhone|iPad|iOS/i.test(s) ? 'iOS' : /Mac OS/i.test(s) ? 'macOS' : /Linux/i.test(s) ? 'Linux' : 'Other';
+  const br = /Edg\//i.test(s) ? 'Edge' : /OPR\/|Opera/i.test(s) ? 'Opera' : /Chrome\//i.test(s) ? 'Chrome' : /Firefox\//i.test(s) ? 'Firefox' : /Safari\//i.test(s) ? 'Safari' : 'Browser';
+  return `${br} · ${os}`;
+};
+// ===== একসাথে সর্বোচ্চ কয়টা device (ডিভাইস) চলবে =====
+const MAX_DEVICES = 2;
+const getSess = (d) => {
+  if (!d || !d.sessionId) return [];
+  const a = Array.isArray(d.sessions) ? d.sessions.filter((x) => x && x.sid) : [];
+  if (!a.some((x) => x.sid === d.sessionId)) a.push({ sid: d.sessionId, dev: '' });
+  return a;
+};
+const sidOk = (d, sid) => !!sid && getSess(d).some((x) => x.sid === sid);
+// একই ধরনের device (যেমন Chrome · Windows) আবার login করলে আগেরটা বদলায়, তাই refresh এ অন্য device কাটা পড়ে না
+const addSess = (d, sid, req) => {
+  const dev = parseDevice(req.headers['user-agent']);
+  const a = getSess(d).filter((x) => x.dev !== dev);
+  a.push({ sid, dev });
+  while (a.length > MAX_DEVICES) a.shift();
+  return a;
+};
+const removeSess = (d, sid) => getSess(d).filter((x) => x.sid !== sid);
+const ensuredHist = new Set();
+const logLogin = async (dbName, req, data) => {
+  try {
+    if (!dbName) return;
+    const col = client.db(dbName).collection('loginHistory');
+    if (!ensuredHist.has(dbName)) {
+      ensuredHist.add(dbName);
+      await col.createIndex({ at: 1 }, { expireAfterSeconds: 15 * 24 * 3600 }).catch(() => { });
+    }
+    await col.insertOne({ at: new Date(), ip: ipOf(req), device: parseDevice(req.headers['user-agent']), ...data });
+  } catch (e) { }
+};
+const lastTouch = new Map();
+const touchActive = (c, s) => {
+  const key = s ? `s:${s._id}` : `d:${c._id}`;
+  const now = Date.now();
+  if (now - (lastTouch.get(key) || 0) < 2 * 60 * 1000) return;
+  lastTouch.set(key, now);
+  const col = s ? client.db(c.dbName).collection('user') : client.db('squirrelDb').collection('client');
+  col.updateOne({ _id: s ? s._id : c._id }, { $set: { lastActiveAt: new Date() } }).catch(() => { });
+};
+setInterval(() => {
+  const n = Date.now();
+  for (const [k, t] of lastTouch) if (n - t > 10 * 60 * 1000) lastTouch.delete(k);
+}, 5 * 60 * 1000).unref();
+
+// admin "login as" (support) token যাচাই: admin এখনো admin কিনা, client/staff আছে কিনা
+const loadImp = async (d) => {
+  if (!d?.imp || !d.adminEmail || !d.clientId || !ObjectId.isValid(d.clientId)) return null;
+  const control = client.db('squirrelDb');
+  const a = await control.collection('users').findOne({ email: d.adminEmail }, CI_OPT);
+  if (!a || a.role !== 'admin') return null;
+  const c = await control.collection('client').findOne({ _id: new ObjectId(d.clientId) });
+  if (!c || !c.dbName) return null;
+  let s = null;
+  if (d.kind === 'staff') {
+    if (!d.staffId || !ObjectId.isValid(d.staffId)) return null;
+    s = await client.db(c.dbName).collection('user').findOne({ _id: new ObjectId(d.staffId) });
+    if (!s) return null;
+  }
+  return { c, s };
 };
 
 // token দেখে কে এসেছে: client (নিজের database সহ) না admin
@@ -154,31 +226,35 @@ const resolveCaller = async (req) => {
   const control = client.db("squirrelDb");
   try {
     const d = jwt.verify(token, process.env.CLIENT_ACCESS_TOKEN_SECRET, { algorithms: ['HS256'] });
+    if (d?.imp) {
+      const im = await loadImp(d);
+      return im ? { type: 'client', client: im.c, dbName: im.c.dbName, staff: im.s || undefined, imp: d.adminEmail } : null;
+    }
     if (d?.clientId && ObjectId.isValid(d.clientId)) {
       const c = await control.collection('client').findOne({ _id: new ObjectId(d.clientId) });
       if (d.kind === 'staff') {
         const s = await loadStaff(c, d);
-        if (s) return { type: 'client', client: c, dbName: c.dbName, staff: s };
+        if (s) { touchActive(c, s); return { type: 'client', client: c, dbName: c.dbName, staff: s }; }
         return null;
       }
-      if (c && c.isActive === true && c.login === 'yes' && c.sessionId && c.sessionId === d.sid && c.dbName && !d.staffId) {
-        return { type: 'client', client: c, dbName: c.dbName };
+      if (c && c.isActive === true && c.login === 'yes' && sidOk(c, d.sid) && c.dbName && !d.staffId) {
+        touchActive(c, null); return { type: 'client', client: c, dbName: c.dbName };
       }
     }
   } catch (e) { }
   try {
     const d = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, { algorithms: ['HS256'] });
     const u = await control.collection('users').findOne({ email: d.email }, CI_OPT);
-    if (u?.role === 'admin' && d.sid && u.sessionId === d.sid) return { type: 'admin', decoded: d };
+    if (u?.role === 'admin' && d.sid && sidOk(u, d.sid)) return { type: 'admin', decoded: d };
   } catch (e) { }
   return null;
 };
 app.use((req, res, next) => {
   if (req.method === 'GET') res.set('Cache-Control', 'no-store');
-  if (req.method !== 'GET' && req.method !== 'OPTIONS' && req.path !== '/jwt' && req.path !== '/client/login' && req.path !== '/client/logout' && req.path !== '/users/verify-admin-password' && !req.path.startsWith('/gate')) {
+  if (req.method !== 'GET' && req.method !== 'OPTIONS' && req.path !== '/jwt' && req.path !== '/client/login' && req.path !== '/client/logout' && !req.path.startsWith('/client/impersonate') && req.path !== '/users/verify-admin-password' && !req.path.startsWith('/gate')) {
     res.on('finish', () => {
       if (res.statusCode < 400) {
-        if (req.versionDb) client.db(req.versionDb).collection('auditLog').insertOne({ at: new Date(), by: req.staff ? { type: 'staff', id: String(req.staff._id), name: req.staff.name, role: req.staff.role } : { type: 'dealer', id: String(req.client?._id || '') }, method: req.method, path: String(req.originalUrl || '').split('?')[0], ip: req.ip }).catch(() => { });
+        if (req.versionDb) client.db(req.versionDb).collection('auditLog').insertOne({ at: new Date(), by: req.imp ? { type: 'admin-impersonation', email: req.imp, as: req.staff ? String(req.staff._id) : 'dealer' } : req.staff ? { type: 'staff', id: String(req.staff._id), name: req.staff.name, role: req.staff.role } : { type: 'dealer', id: String(req.client?._id || '') }, method: req.method, path: String(req.originalUrl || '').split('?')[0], ip: req.ip }).catch(() => { });
         client.db(req.versionDb || "squirrelDb").collection("meta")
           .updateOne({ _id: 'dataVersion' }, { $inc: { version: 1 } }, { upsert: true })
           .catch(() => { });
@@ -376,7 +452,7 @@ async function run() {
         const sid = crypto.randomUUID();
         await usersCollection.updateOne(
           { email: decodedFirebase.email },
-          { $set: { sessionId: sid } },
+          { $set: { sessionId: sid, sessions: addSess(await usersCollection.findOne({ email: decodedFirebase.email }, { collation: { locale: 'en', strength: 2 } }) || {}, sid, req) } },
           { collation: { locale: 'en', strength: 2 } }
         );
         const token = jwt.sign({ email: decodedFirebase.email, sid }, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '1h' });
@@ -401,7 +477,7 @@ async function run() {
         usersCollection
           .findOne({ email: decoded.email }, { collation: { locale: 'en', strength: 2 } })
           .then((u) => {
-            if (!decoded.sid || !u || !u.sessionId || u.sessionId !== decoded.sid) {
+            if (!decoded.sid || !u || !sidOk(u, decoded.sid)) {
               return res.status(401).send({ message: 'unauthorized access' });
             }
             req.decoded = decoded;
@@ -454,7 +530,7 @@ async function run() {
     // users related api
 
     app.get('/users', verifyToken, verifyAdmin, async (req, res) => {
-      const result = await usersCollection.find({}, { projection: { sessionId: 0 } }).toArray();
+      const result = await usersCollection.find({}, { projection: { sessionId: 0, sessions: 0 } }).toArray();
       res.send(result);
     });
 
@@ -651,13 +727,24 @@ async function run() {
       return { userLimit: limit, staffCount, excess, limitExceeded: excess > 0 };
     };
     const publicClient = (c) => {
-      const { password, passwordHash, sessionId, dbName, ...rest } = c;
+      const { password, passwordHash, sessionId, sessions, dbName, ...rest } = c;
       return { ...rest, login: rest.login || 'no', userLimit: Number.isInteger(rest.userLimit) && rest.userLimit >= 1 ? rest.userLimit : 10 };
     };
 
     app.get('/client', verifyToken, verifyAdmin, async (req, res) => {
       const clients = await clientCollection.find().toArray();
-      res.send(clients.map(publicClient));
+      const withCount = await Promise.all(
+        clients.map(async (c) => {
+          let staffCount = 0;
+          if (c.dbName) {
+            try {
+              staffCount = await client.db(c.dbName).collection('user').countDocuments({});
+            } catch (e) { }
+          }
+          return { ...publicClient(c), staffCount };
+        })
+      );
+      res.send(withCount);
     });
 
     // নতুন ক্লায়েন্ট যোগ করার রাউট
@@ -758,6 +845,7 @@ async function run() {
         if (!current) return res.status(404).json({ message: 'Client not found' });
 
         const setDoc = { name, phone, email, address, isActive: body.isActive === true, whatsapp: cleanWhatsapp(body.whatsapp), userLimit: parseUserLimit(body.userLimit) };
+        if (current.isActive !== setDoc.isActive) { setDoc.statusChangedAt = new Date(); setDoc.statusChangedBy = req.decoded.email; }
 
         // slug/database একবার ঠিক হলে আর বদলানো যাবে না (data হারানো ঠেকাতে)
         if (!current.slug) {
@@ -778,10 +866,14 @@ async function run() {
         const unsetDoc = {};
         if (password) {
           setDoc.passwordHash = await hashPassword(password);
+          setDoc.passwordChangedAt = new Date();
+          setDoc.lastLogoutAt = new Date();
+          setDoc.lastLogoutReason = 'password_reset';
           setDoc.login = 'no';
           unsetDoc.password = '';
           unsetDoc.sessionId = '';
         }
+        if (!setDoc.isActive && current.sessionId) { setDoc.lastLogoutAt = new Date(); setDoc.lastLogoutReason = 'inactive'; }
         // inactive korle sathe sathe logout
         if (!setDoc.isActive) {
           setDoc.login = 'no';
@@ -816,10 +908,15 @@ async function run() {
       try {
         const { id } = req.params;
         const { login } = req.body; // 'yes' বা 'no'
+        const tgt = await clientCollection.findOne({ _id: new ObjectId(id) });
+        if (tgt) {
+          await clientCollection.updateOne({ _id: tgt._id }, { $set: { lastLogoutAt: new Date(), lastLogoutReason: 'force_admin' } });
+          if (tgt.sessionId) logLogin(tgt.dbName, req, { userType: 'dealer', userKey: 'dealer', userId: String(tgt._id), name: tgt.name, email: tgt.email, event: 'logout', reason: 'force_admin', by: req.decoded.email });
+        }
 
         const result = await clientCollection.updateOne(
           { _id: new ObjectId(id) },
-          { $set: { login: 'no' }, $unset: { sessionId: '' } }
+          { $set: { login: 'no' }, $unset: { sessionId: '', sessions: '' } }
         );
 
         res.send(result);
@@ -847,6 +944,14 @@ async function run() {
         const token = (req.headers.authorization || '').split(' ')[1];
         if (!token) return res.status(401).send({ message: 'unauthorized access' });
         const decoded = jwt.verify(token, process.env.CLIENT_ACCESS_TOKEN_SECRET, { algorithms: ['HS256'] });
+        if (decoded.imp) {
+          const im = await loadImp(decoded);
+          if (!im) return res.status(401).send({ message: 'unauthorized access' });
+          req.client = im.c;
+          req.staff = im.s;
+          req.imp = decoded.adminEmail;
+          return next();
+        }
         if (!decoded?.clientId || !ObjectId.isValid(decoded.clientId)) {
           return res.status(401).send({ message: 'unauthorized access' });
         }
@@ -859,7 +964,7 @@ async function run() {
           return next();
         }
         if (decoded.staffId) return res.status(401).send({ message: 'unauthorized access' });
-        if (!c || c.isActive !== true || c.login !== 'yes' || !c.sessionId || c.sessionId !== decoded.sid) {
+        if (!c || c.isActive !== true || c.login !== 'yes' || !sidOk(c, decoded.sid)) {
           return res.status(401).send({ message: 'unauthorized access' });
         }
         req.client = c;
@@ -868,6 +973,210 @@ async function run() {
         res.status(401).send({ message: 'unauthorized access' });
       }
     };
+
+    // ===== admin "login as" (support): password ছাড়া client / staff এর account এ ঢোকা =====
+    const impCodes = new Map(); // code -> { clientId, staffId, adminEmail, exp }
+    setInterval(() => {
+      const now = Date.now();
+      for (const [k, v] of impCodes) if (now > v.exp) impCodes.delete(k);
+    }, 60 * 1000).unref();
+    app.use('/client/impersonate', mkLimiter(15 * 60 * 1000, 60, 'Too many attempts. Try again later.'));
+
+    // admin: client এর সব user এর তালিকা (password/hash/session/permission ছাড়া)
+    app.get('/client/:id/users', verifyToken, verifyAdmin, async (req, res) => {
+      const id = req.params.id;
+      if (!ObjectId.isValid(id)) return res.status(404).send({ message: 'Client not found' });
+      const c = await clientCollection.findOne({ _id: new ObjectId(id) });
+      if (!c) return res.status(404).send({ message: 'Client not found' });
+      let users = [];
+      if (c.dbName) {
+        users = await client.db(c.dbName).collection('user')
+          .find({}, { projection: { password: 0, passwordHash: 0, sessionId: 0, sessions: 0, permissions: 0 } })
+          .toArray();
+      }
+      res.send(users);
+    });
+
+    // admin: dealer + staff এর login / session তথ্য (v1.8g)
+    app.get('/client/:id/login-info', verifyToken, verifyAdmin, async (req, res) => {
+      const id = req.params.id;
+      if (!ObjectId.isValid(id)) return res.status(404).send({ message: 'Client not found' });
+      const c = await clientCollection.findOne({ _id: new ObjectId(id) });
+      if (!c) return res.status(404).send({ message: 'Client not found' });
+      const now = new Date();
+      if (!c.dbName) return res.send({ now, users: [], history: [], failed24h: 0 });
+      const db = client.db(c.dbName);
+      const hcol = db.collection('loginHistory');
+      const staff = await db.collection('user').find({}, { projection: { password: 0, passwordHash: 0, permissions: 0 } }).toArray();
+      const history = await hcol.find({}).sort({ at: -1 }).limit(300).toArray();
+      const lastLogins = await hcol.aggregate([
+        { $match: { event: 'login' } },
+        { $sort: { at: -1 } },
+        { $group: { _id: '$userKey', ip: { $first: '$ip' }, device: { $first: '$device' } } },
+      ]).toArray();
+      const lm = new Map(lastLogins.map((x) => [x._id, x]));
+      const failed24h = await hcol.countDocuments({ event: 'failed', at: { $gte: new Date(Date.now() - 24 * 3600 * 1000) } });
+      const mk = (u, isDealer) => {
+        const key = isDealer ? 'dealer' : String(u._id);
+        const l = lm.get(key) || {};
+        return {
+          _id: String(u._id), userKey: key, isDealer,
+          name: u.name, email: u.email, phone: u.phone || '',
+          role: isDealer ? 'Super Admin' : u.role,
+          isActive: u.isActive === true,
+          login: u.sessionId ? 'yes' : 'no',
+          lastLoginAt: u.lastLoginAt || null,
+          lastActiveAt: u.lastActiveAt || null,
+          sessionStartedAt: u.sessionStartedAt || null,
+          lastLogoutAt: u.lastLogoutAt || null,
+          lastLogoutReason: u.lastLogoutReason || '',
+          loginCount: u.loginCount || 0,
+          passwordChangedAt: u.passwordChangedAt || null,
+          statusChangedAt: u.statusChangedAt || null,
+          statusChangedBy: u.statusChangedBy || '',
+          lastLoginIp: l.ip || '',
+          lastLoginDevice: l.device || '',
+        };
+      };
+      const users = [mk(c, true), ...staff.map((s) => mk(s, false))];
+      const nm = new Map(users.map((u) => [u.userKey, u]));
+      res.send({
+        now,
+        users,
+        failed24h,
+        history: history.map((h) => ({
+          ...h,
+          _id: String(h._id),
+          name: h.name || nm.get(h.userKey)?.name || '',
+          email: h.email || nm.get(h.userKey)?.email || '',
+        })),
+      });
+    });
+
+    // admin: একবার-ব্যবহারযোগ্য code বানায় (৬০ সেকেন্ড)    // admin: dealer + staff এর login / session তথ্য (v1.8g)
+    app.get('/client/:id/login-info', verifyToken, verifyAdmin, async (req, res) => {
+      const id = req.params.id;
+      if (!ObjectId.isValid(id)) return res.status(404).send({ message: 'Client not found' });
+      const c = await clientCollection.findOne({ _id: new ObjectId(id) });
+      if (!c) return res.status(404).send({ message: 'Client not found' });
+      const now = new Date();
+      if (!c.dbName) return res.send({ now, users: [], history: [], failed24h: 0 });
+      const db = client.db(c.dbName);
+      const hcol = db.collection('loginHistory');
+      const staff = await db.collection('user').find({}, { projection: { password: 0, passwordHash: 0, permissions: 0 } }).toArray();
+      const history = await hcol.find({}).sort({ at: -1 }).limit(300).toArray();
+      const lastLogins = await hcol.aggregate([
+        { $match: { event: 'login' } },
+        { $sort: { at: -1 } },
+        { $group: { _id: '$userKey', ip: { $first: '$ip' }, device: { $first: '$device' } } },
+      ]).toArray();
+      const lm = new Map(lastLogins.map((x) => [x._id, x]));
+      const failed24h = await hcol.countDocuments({ event: 'failed', at: { $gte: new Date(Date.now() - 24 * 3600 * 1000) } });
+      const mk = (u, isDealer) => {
+        const key = isDealer ? 'dealer' : String(u._id);
+        const l = lm.get(key) || {};
+        return {
+          _id: String(u._id), userKey: key, isDealer,
+          name: u.name, email: u.email, phone: u.phone || '',
+          role: isDealer ? 'Super Admin' : u.role,
+          isActive: u.isActive === true,
+          login: u.sessionId ? 'yes' : 'no',
+          lastLoginAt: u.lastLoginAt || null,
+          lastActiveAt: u.lastActiveAt || null,
+          sessionStartedAt: u.sessionStartedAt || null,
+          lastLogoutAt: u.lastLogoutAt || null,
+          lastLogoutReason: u.lastLogoutReason || '',
+          loginCount: u.loginCount || 0,
+          passwordChangedAt: u.passwordChangedAt || null,
+          statusChangedAt: u.statusChangedAt || null,
+          statusChangedBy: u.statusChangedBy || '',
+          lastLoginIp: l.ip || '',
+          lastLoginDevice: l.device || '',
+        };
+      };
+      const users = [mk(c, true), ...staff.map((s) => mk(s, false))];
+      const nm = new Map(users.map((u) => [u.userKey, u]));
+      res.send({
+        now,
+        users,
+        failed24h,
+        history: history.map((h) => ({
+          ...h,
+          _id: String(h._id),
+          name: h.name || nm.get(h.userKey)?.name || '',
+          email: h.email || nm.get(h.userKey)?.email || '',
+        })),
+      });
+    });
+
+    // admin: একবার-ব্যবহারযোগ্য code বানায় (৬০ সেকেন্ড)
+    app.post('/client/impersonate', verifyToken, verifyAdmin, async (req, res) => {
+      const clientId = String(req.body?.clientId || '');
+      const staffId = req.body?.staffId ? String(req.body.staffId) : '';
+      if (!ObjectId.isValid(clientId)) return res.status(404).send({ message: 'Client not found' });
+      const c = await clientCollection.findOne({ _id: new ObjectId(clientId) });
+      if (!c || !c.slug || !c.dbName) return res.status(400).send({ message: 'This client has no subdomain yet' });
+      if (staffId) {
+        if (!ObjectId.isValid(staffId)) return res.status(404).send({ message: 'User not found' });
+        const t = await client.db(c.dbName).collection('user').findOne({ _id: new ObjectId(staffId) }, { projection: { _id: 1 } });
+        if (!t) return res.status(404).send({ message: 'User not found' });
+      }
+      const code = crypto.randomBytes(32).toString('hex');
+      impCodes.set(code, { clientId, staffId, adminEmail: req.decoded.email, exp: Date.now() + 60 * 1000 });
+      controlDb.collection('impersonationLog').insertOne({
+        at: new Date(), adminEmail: req.decoded.email, clientId, staffId: staffId || null, as: staffId ? 'staff' : 'dealer', ip: getIp(req),
+      }).catch(() => { });
+      client.db(c.dbName).collection('auditLog').insertOne({
+        at: new Date(), by: { type: 'admin-impersonation', email: req.decoded.email }, method: 'IMPERSONATE', path: staffId ? `/staff/${staffId}` : '/dealer', ip: getIp(req),
+      }).catch(() => { });
+      logLogin(c.dbName, req, { userType: staffId ? 'staff' : 'dealer', userKey: staffId || 'dealer', userId: staffId || String(c._id), name: '', email: '', event: 'impersonation', reason: 'admin_login_as', by: req.decoded.email });
+      res.send({ code, slug: c.slug });
+    });
+
+    // client এর subdomain থেকে: code দিয়ে token নেওয়া (code একবারই চলে, শুধু ওই client এর slug এ)
+    app.post('/client/impersonate/exchange', async (req, res) => {
+      const code = String(req.body?.code || '');
+      const slug = String(req.body?.slug || '').trim().toLowerCase();
+      const rec = impCodes.get(code);
+      impCodes.delete(code);
+      if (!rec || Date.now() > rec.exp) return res.status(400).send({ message: 'Link expired. Try again from the admin panel.' });
+      const c = await clientCollection.findOne({ _id: new ObjectId(rec.clientId) });
+      if (!c || !c.slug || !c.dbName || c.slug !== slug) return res.status(400).send({ message: 'Invalid link' });
+      let staff = null;
+      if (rec.staffId) {
+        staff = await client.db(c.dbName).collection('user').findOne({ _id: new ObjectId(rec.staffId) });
+        if (!staff) return res.status(400).send({ message: 'User not found' });
+      }
+      const token = jwt.sign(
+        {
+          clientId: String(c._id),
+          kind: staff ? 'staff' : 'dealer',
+          staffId: staff ? String(staff._id) : undefined,
+          email: staff ? staff.email : c.email,
+          imp: true,
+          adminEmail: rec.adminEmail,
+        },
+        process.env.CLIENT_ACCESS_TOKEN_SECRET,
+        { expiresIn: '2h', algorithm: 'HS256' }
+      );
+      const who = staff || c;
+      res.send({
+        token,
+        client: {
+          _id: who._id,
+          name: who.name,
+          email: who.email,
+          phone: who.phone || '',
+          address: who.address || '',
+          role: staff ? staff.role : undefined,
+          isActive: true,
+          login: 'yes',
+          isStaff: !!staff,
+          permissions: staff ? staff.permissions || {} : undefined,
+          impersonated: true,
+        },
+      });
+    });
 
     // client nijer live status (password chhara)
     app.get('/client/me', verifyClientToken, async (req, res) => {
@@ -883,6 +1192,7 @@ async function run() {
           role: s.role,
           isActive: true,
           login: 'yes',
+          impersonated: !!req.imp,
           isStaff: true,
           slug: req.client.slug,
           dealerName: req.client.name,
@@ -892,7 +1202,11 @@ async function run() {
           excess: limitInfo.excess,
         });
       }
-      res.send({ ...publicClient(req.client), ...limitInfo });
+      res.send({
+        ...publicClient(req.client),
+        ...limitInfo,
+        ...(req.imp ? { isActive: true, login: 'yes', impersonated: true } : {}),
+      });
     });
 
     // admin ek client er details (password/hash/session kokhono jabe na)
@@ -902,7 +1216,13 @@ async function run() {
         if (!ObjectId.isValid(id)) return res.status(404).json({ message: 'Client not found' });
         const c = await clientCollection.findOne({ _id: new ObjectId(id) });
         if (!c) return res.status(404).json({ message: 'Client not found' });
-        res.send(publicClient(c));
+        let staffCount = 0;
+        if (c.dbName) {
+          try {
+            staffCount = await client.db(c.dbName).collection('user').countDocuments({});
+          } catch (e) { }
+        }
+        res.send({ ...publicClient(c), staffCount });
       } catch (error) {
         res.status(500).json({ message: 'Failed to fetch client' });
       }
@@ -917,7 +1237,7 @@ async function run() {
 
     app.post('/client/change-password', verifyClientToken, async (req, res) => {
       try {
-        if (req.staff) return res.status(403).json({ message: 'Only the dealer can change the password.' });
+        if (req.staff || req.imp) return res.status(403).json({ message: 'Only the dealer can change the password.' });
         const key = String(req.client._id);
         const fail = changePassFails.get(key);
         if (fail && fail.lockUntil && Date.now() < fail.lockUntil) {
@@ -969,7 +1289,7 @@ async function run() {
         await clientCollection.updateOne(
           { _id: req.client._id },
           {
-            $set: { passwordHash: await hashPassword(newPassword), login: 'no' },
+            $set: { passwordHash: await hashPassword(newPassword), login: 'no', passwordChangedAt: new Date(), lastLogoutAt: new Date(), lastLogoutReason: 'password_changed' },
             $unset: { password: '', sessionId: '' },
           }
         );
@@ -983,11 +1303,19 @@ async function run() {
 
     // client nijer logout
     app.post('/client/logout', verifyClientToken, async (req, res) => {
+      if (req.imp) return res.send({ success: true });
+      const lo = new Date();
+      const who = req.staff || req.client;
+      logLogin(req.client.dbName, req, { userType: req.staff ? 'staff' : 'dealer', userKey: req.staff ? String(req.staff._id) : 'dealer', userId: String(who._id), name: who.name, email: who.email, event: 'logout', reason: 'self' });
+      if (req.staff) await client.db(req.client.dbName).collection('user').updateOne({ _id: req.staff._id }, { $set: { lastLogoutAt: lo, lastLogoutReason: 'self' } });
+      else await clientCollection.updateOne({ _id: req.client._id }, { $set: { lastLogoutAt: lo, lastLogoutReason: 'self' } });
       if (req.staff) {
-        await client.db(req.client.dbName).collection('user').updateOne({ _id: req.staff._id }, { $unset: { sessionId: '' } });
+        const remS = removeSess(req.staff, jwt.decode((req.headers.authorization || '').split(' ')[1])?.sid);
+        await client.db(req.client.dbName).collection('user').updateOne({ _id: req.staff._id }, remS.length ? { $set: { sessions: remS, sessionId: remS[remS.length - 1].sid } } : { $unset: { sessions: '', sessionId: '' } });
         return res.send({ success: true });
       }
-      await clientCollection.updateOne({ _id: req.client._id }, { $set: { login: 'no' }, $unset: { sessionId: '' } });
+      const remD = removeSess(req.client, jwt.decode((req.headers.authorization || '').split(' ')[1])?.sid);
+      await clientCollection.updateOne({ _id: req.client._id }, remD.length ? { $set: { sessions: remD, sessionId: remD[remD.length - 1].sid } } : { $set: { login: 'no' }, $unset: { sessions: '', sessionId: '' } });
       res.send({ success: true });
     });
 
@@ -995,6 +1323,11 @@ async function run() {
     const staffLogin = async (req, res, { email, password, slug, key, fail }) => {
       const invalid = () => res.status(400).json({ message: 'Invalid email or password!' });
       const tenant = slug ? await clientCollection.findOne({ slug }) : null;
+      res.on('finish', () => {
+        if (tenant && (res.statusCode === 400 || res.statusCode === 403)) {
+          logLogin(tenant.dbName, req, { userType: staff ? 'staff' : 'unknown', userKey: staff ? String(staff._id) : 'unknown', userId: staff ? String(staff._id) : null, name: staff?.name || '', email, event: 'failed', reason: res.statusCode === 403 ? 'inactive' : 'wrong_password' });
+        }
+      });
       let staff = null;
       if (tenant && tenant.dbName) {
         staff = await client.db(tenant.dbName).collection('user').findOne({ email }, CI);
@@ -1021,11 +1354,13 @@ async function run() {
 
       if (tenant.isActive !== true) return res.status(403).json({ message: 'Your company account is inactive!' });
       if (staff.isActive !== true) return res.status(403).json({ message: 'Your account is inactive! Contact your dealer.' });
+      if (getSess(staff).length >= MAX_DEVICES) logLogin(tenant.dbName, req, { userType: 'staff', userKey: String(staff._id), userId: String(staff._id), name: staff.name, email: staff.email, event: 'logout', reason: 'new_login' });
+      logLogin(tenant.dbName, req, { userType: 'staff', userKey: String(staff._id), userId: String(staff._id), name: staff.name, email: staff.email, event: 'login' });
 
       const sid = crypto.randomUUID();
       await client.db(tenant.dbName).collection('user').updateOne(
         { _id: staff._id },
-        { $set: { sessionId: sid, lastLoginAt: new Date() } }
+        { $set: { sessionId: sid, sessions: addSess(staff, sid, req), lastLoginAt: new Date(), lastActiveAt: new Date(), sessionStartedAt: new Date() }, $inc: { loginCount: 1 } }
       );
       const token = jwt.sign(
         { clientId: String(tenant._id), staffId: String(staff._id), email: staff.email, sid, kind: 'staff' },
@@ -1055,7 +1390,7 @@ async function run() {
         const password = String(req.body?.password || '');
         const invalid = () => res.status(400).json({ message: 'Invalid email or password!' });
 
-        if (!email || !password || password.length > 128) return invalid();
+        if (!email || email.length > 150 || !password || password.length > 128) return invalid();
 
         const key = `${getIp(req)}|${email}`;
         const fail = clientLoginFails.get(key);
@@ -1065,6 +1400,13 @@ async function run() {
 
         const reqSlugEarly = String(req.body?.slug || '').trim().toLowerCase();
         const client = await clientCollection.findOne({ email }, CI);
+        if (client && client.slug === reqSlugEarly) {
+          res.on('finish', () => {
+            if (res.statusCode === 400 || res.statusCode === 403) {
+              logLogin(client.dbName, req, { userType: 'dealer', userKey: 'dealer', userId: String(client._id), name: client.name, email, event: 'failed', reason: res.statusCode === 403 ? 'inactive' : 'wrong_password' });
+            }
+          });
+        }
 
         // dealer না হলে (বা অন্য subdomain এর হলে) এই company এর staff হিসেবে চেষ্টা
         if (!client || client.slug !== reqSlugEarly) {
@@ -1115,9 +1457,11 @@ async function run() {
         const sid = crypto.randomUUID();
         await clientCollection.updateOne(
           { _id: client._id },
-          { $set: { login: 'yes', sessionId: sid } }
+          { $set: { login: 'yes', sessionId: sid, sessions: addSess(client, sid, req), lastLoginAt: new Date(), lastActiveAt: new Date(), sessionStartedAt: new Date() }, $inc: { loginCount: 1 } }
         );
 
+        if (getSess(client).length >= MAX_DEVICES) logLogin(client.dbName, req, { userType: 'dealer', userKey: 'dealer', userId: String(client._id), name: client.name, email: client.email, event: 'logout', reason: 'new_login' });
+        logLogin(client.dbName, req, { userType: 'dealer', userKey: 'dealer', userId: String(client._id), name: client.name, email: client.email, event: 'login' });
         const tokenPayload = { clientId: String(client._id), email: client.email, sid };
         const token = jwt.sign(
           tokenPayload,
@@ -1159,6 +1503,7 @@ async function run() {
       if (who?.type === 'client') {
         req.client = who.client;
         req.staff = who.staff || null;
+        req.imp = who.imp || null;
         req.versionDb = who.dbName;
         return tenantStore.run({ dbName: who.dbName }, () => next());
       }
@@ -1253,7 +1598,7 @@ async function run() {
     const SALES_FORM_READ = [...FIN_READ, '/bulk-return-stock'];
 
     const PERMISSION_MODULES = {
-      dashboard: { reads: [...FIN_READ, '/sales-sr-target'] },
+      dashboard: { reads: [] },
       wholesale: { apis: ['/sales'], reads: [...SALES_FORM_READ, '/sales-sr-target'] },
       create_order: { apis: ['/sales'], reads: SALES_FORM_READ },
       sales_return: { apis: ['/sales'], reads: SALES_FORM_READ },
@@ -1449,8 +1794,8 @@ async function run() {
 
     app.use(async (req, res, next) => {
       if (!req.staff) return next(); // dealer (Super Admin) এর সব access
-      if (req.method !== 'PUT' && req.method !== 'DELETE') return next();
-      const m = req.path.match(/^\/(user|user-permission)\/([^/]+)$/);
+      if (req.method !== 'PUT' && req.method !== 'DELETE' && req.method !== 'PATCH') return next();
+      const m = req.path.match(/^\/(user|user-permission)\/([^/]+)(?:\/logout)?$/);
       if (!m) return next();
       const kind = m[1];
       const targetId = m[2];
@@ -2044,9 +2389,12 @@ async function run() {
     // Get all users
     app.get('/user', async (req, res) => {
       try {
-        const result = await userCollection
-          .find({}, { projection: req.staff && !(req.staff.permissions?.user_assign || []).includes('get') ? { password: 0, passwordHash: 0, sessionId: 0, permissions: 0 } : { password: 0, passwordHash: 0, sessionId: 0 } })
+        const hidePerm = req.staff && !(req.staff.permissions?.user_assign || []).includes('get');
+        const list = await userCollection
+          .find({}, { projection: hidePerm ? { password: 0, passwordHash: 0, permissions: 0 } : { password: 0, passwordHash: 0 } })
           .toArray();
+        // sessionId কখনো পাঠানো হয় না, শুধু login yes / no
+        const result = list.map(({ sessionId, sessions, ...u }) => ({ ...u, login: sessionId ? 'yes' : 'no' }));
         res.send(result);
       } catch (error) {
         res.status(500).send({ error: 'Failed to fetch users' });
@@ -2102,6 +2450,12 @@ async function run() {
           setDoc.passwordHash = await hashPassword(existing.password);
           unsetDoc.password = '';
         }
+        if (existing.isActive !== setDoc.isActive) { setDoc.statusChangedAt = new Date(); setDoc.statusChangedBy = req.staff ? req.staff.name : (req.imp ? `admin:${req.imp}` : 'dealer'); }
+        if ((!setDoc.isActive || built.passwordHash) && existing.sessionId) {
+          setDoc.lastLogoutAt = new Date();
+          setDoc.lastLogoutReason = !setDoc.isActive ? 'inactive' : 'password_reset';
+          logLogin(req.client.dbName, req, { userType: 'staff', userKey: String(existing._id), userId: String(existing._id), name: existing.name, email: existing.email, event: 'logout', reason: setDoc.lastLogoutReason, by: req.staff ? req.staff.name : (req.imp ? `admin:${req.imp}` : 'dealer') });
+        }
         if (!setDoc.isActive) unsetDoc.sessionId = '';
 
         const updateDoc = { $set: setDoc };
@@ -2116,6 +2470,21 @@ async function run() {
       } catch (error) {
         console.error('Error updating user:', error);
         res.status(500).json({ error: 'Internal Server Error' });
+      }
+    });
+
+    // user (staff) কে force logout
+    app.patch('/user/:id/logout', async (req, res) => {
+      try {
+        const { id } = req.params;
+        if (!ObjectId.isValid(id)) return res.status(404).send({ message: 'User not found' });
+        const tgt = await userCollection.findOne({ _id: new ObjectId(id) }, { projection: { name: 1, email: 1, sessionId: 1 } });
+        const r = await userCollection.updateOne({ _id: new ObjectId(id) }, { $unset: { sessionId: '' }, $set: { lastLogoutAt: new Date(), lastLogoutReason: 'force_dealer' } });
+        if (tgt && tgt.sessionId) logLogin(req.client.dbName, req, { userType: 'staff', userKey: String(tgt._id), userId: String(tgt._id), name: tgt.name, email: tgt.email, event: 'logout', reason: 'force_dealer', by: req.staff ? req.staff.name : (req.imp ? `admin:${req.imp}` : 'dealer') });
+        if (!r.matchedCount) return res.status(404).send({ message: 'User not found' });
+        res.send({ success: true });
+      } catch (error) {
+        res.status(500).send({ message: 'Failed to logout user' });
       }
     });
 
@@ -2322,7 +2691,6 @@ async function run() {
         type: item.type === 'Get' || item.status === 'Get' ? 'Get' : 'Pay',
         status: item.type === 'Get' || item.status === 'Get' ? 'Get' : 'Pay',
         invoiceNo: item.invoiceNo || generateInvoiceNo(),
-        createdAt: item.createdAt || new Date().toLocaleString('en-GB', { timeZone: 'Asia/Dhaka' }),
       };
 
       const result = await PurchaseDuePaymentCollection.insertOne(doc);
@@ -2518,6 +2886,11 @@ async function run() {
     // Add a product
     app.post('/product', async (req, res) => {
       const item = req.body;
+      const dupKey = `pr:${tenantStore.getStore()?.dbName}:${String(item.productName || '').trim().toLowerCase()}|${String(item.company || '').trim().toLowerCase()}`;
+      if (recentKeys.has(dupKey)) return res.send({ acknowledged: true, duplicate: true });
+      recentKeys.add(dupKey);
+      setTimeout(() => recentKeys.delete(dupKey), 5000);
+      res.on('finish', () => { if (res.statusCode >= 400) recentKeys.delete(dupKey); });
       const result = await productCollection.insertOne(item);
       res.send(result);
     });
@@ -4802,7 +5175,6 @@ app.get('/', (req, res) => {
 app.get('/ping', (req, res) => {
   res.send('pong');
 });
-
 
 app.listen(port, () => {
   console.log(`Bashay Bazar is sitting on port ${port}`);
