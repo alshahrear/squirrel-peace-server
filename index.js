@@ -1531,6 +1531,21 @@ async function run() {
     // ===== user limit ছাড়িয়ে গেলে dealer ও staff এর সব কাজ বন্ধ =====
     // চলবে শুধু: GET /user, DELETE /user/:id, GET /feature
     const isReservedRole = (n) => String(n || '').toLowerCase().replace(/[\s_-]+/g, '') === 'superadmin';
+
+    // প্রতিটা dealer এর জন্য fixed role: SR, Delivery Man (delete / edit / নতুন করে add করা যাবে না)
+    const FIXED_ROLES = ['SR', 'Delivery Man'];
+    const isFixedRole = (n) => FIXED_ROLES.some((r) => r.toLowerCase() === String(n || '').trim().toLowerCase());
+    const ensureFixedRoles = async () => {
+      for (const r of FIXED_ROLES) {
+        const ex = await userRoleCollection.findOne({ role: r }, CI);
+        if (!ex) {
+          await userRoleCollection.insertOne({ role: r, fixed: true, createdAt: new Date().toISOString() });
+        } else if (ex.role !== r || ex.fixed !== true) {
+          await userRoleCollection.updateOne({ _id: ex._id }, { $set: { role: r, fixed: true } });
+          if (ex.role !== r) await userCollection.updateMany({ role: ex.role }, { $set: { role: r } });
+        }
+      }
+    };
     app.use(async (req, res, next) => {
       if (!req.client || req.method === 'OPTIONS') return next();
       const info = await getLimitInfo(req.client);
@@ -1874,6 +1889,7 @@ async function run() {
       if (!roleInput) return { error: 'Role is required!' };
 
       // role অবশ্যই এই dealer এর নিজের role list এ থাকতে হবে
+      await ensureFixedRoles();
       const roleDoc = await userRoleCollection.findOne({ role: roleInput }, CI);
       if (!roleDoc) return { error: 'Invalid role selected!' };
 
@@ -2507,7 +2523,9 @@ async function run() {
 
     // ১. সকল ইউজার রোল ফেচ করা (GET)
     app.get('/userRole', async (req, res) => {
-      const result = await userRoleCollection.find().toArray();
+      await ensureFixedRoles();
+      const list = await userRoleCollection.find().toArray();
+      const result = list.map((r) => ({ ...r, fixed: isFixedRole(r.role) }));
       res.send(result);
     });
 
@@ -2519,6 +2537,7 @@ async function run() {
         return res.status(400).send({ message: 'Role name must be 2-50 characters!' });
       }
       if (isReservedRole(roleName)) return res.status(400).send({ message: '"Super Admin" নামে role বানানো যাবে না!' });
+      await ensureFixedRoles();
       const roleDup = await userRoleCollection.findOne({ role: roleName }, CI);
       if (roleDup) return res.status(400).send({ message: 'This role already exists!' });
       const result = await userRoleCollection.insertOne({ role: roleName, createdAt: new Date().toISOString() });
@@ -2538,6 +2557,8 @@ async function run() {
         const existingRole = await userRoleCollection.findOne({ _id: new ObjectId(id) });
         if (!existingRole) return res.status(404).json({ error: 'Role record not found' });
 
+        if (isFixedRole(existingRole.role)) return res.status(403).json({ message: 'SR ও Delivery Man fixed role, edit করা যাবে না!' });
+        if (isFixedRole(roleName)) return res.status(400).json({ message: 'This role already exists!' });
         if (isReservedRole(roleName)) return res.status(400).json({ message: '"Super Admin" নামে role বানানো যাবে না!' });
         const roleDup = await userRoleCollection.findOne({ role: roleName, _id: { $ne: existingRole._id } }, CI);
         if (roleDup) return res.status(400).json({ message: 'This role already exists!' });
@@ -2567,6 +2588,9 @@ async function run() {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
       const roleToDelete = await userRoleCollection.findOne(query);
+      if (roleToDelete && isFixedRole(roleToDelete.role)) {
+        return res.status(403).send({ message: 'SR ও Delivery Man fixed role, delete করা যাবে না!' });
+      }
       if (roleToDelete?.role) {
         const inUse = await userCollection.countDocuments({ role: roleToDelete.role });
         if (inUse > 0) {
@@ -2756,7 +2780,6 @@ async function run() {
         type: item.type === 'Pay' || item.status === 'Pay' ? 'Pay' : 'Get',
         status: item.type === 'Pay' || item.status === 'Pay' ? 'Pay' : 'Get',
         invoiceNo: item.invoiceNo || generateInvoiceNo(),
-        createdAt: item.createdAt || new Date().toLocaleString('en-GB', { timeZone: 'Asia/Dhaka' }),
       };
 
       const result = await SalesDuePaymentCollection.insertOne(doc);
